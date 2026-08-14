@@ -1,0 +1,62 @@
+{
+  "sessionId": "session-b84b9d8d-f54e-44b2-bd25-09bfdb789f11",
+  "plugin": "ctxc-1",
+  "engineUnderTest": "@deepseek-ai/dsh-compaction-basic (BasicCompactionEngine, runtime-patched)",
+  "pricesCnyPerMillion": {
+    "deepseek-v4-flash": { "cacheHit": 0.02, "cacheMiss": 1.0, "output": 2.0 },
+    "deepseek-v4-pro": { "cacheHit": 0.025, "cacheMiss": 3.0, "output": 6.0 }
+  },
+  "usageSemantics": "inputTokens = cache-miss input; cacheReadTokens = cache-hit input (disjoint)",
+  "runs": [
+    {
+      "run": 1,
+      "engine": "patched",
+      "boundarySeqs": { "start": 81778, "end": 87981 },
+      "shadowedTokenCount": 12436,
+      "shadowedSeqs": [81778, 84806, 84808, 84904, 84906, 85895, 85901, 86446, 86448, 87981],
+      "usage": { "inputTokens": 470, "outputTokens": 4438, "cacheReadTokens": 47232, "reasoningTokens": 3621 },
+      "compactionId": "f2433ca6-03ff-462d-a459-727c4d38d20d",
+      "archiveLocator": "/var/folders/43/c8m594_s5dldymsklkkq2m8r0000gn/T/dsh-spill-PYCAvK/session-62fcfc9e23c4/2dadeeb5dbdc-ab-patched.txt",
+      "note": "first compaction of the turn; surface still matches the last routed request (clean measurement)"
+    },
+    {
+      "run": 2,
+      "engine": "original",
+      "boundarySeqs": { "start": 87988, "end": 101545 },
+      "shadowedTokenCount": 25213,
+      "shadowedSeqs": [87988, 90166, 90173, 91966, 91973, 98203, 98205, 98280, 98282, 98988, 98990, 99236, 99238, 99612, 99614, 100291, 100298, 101545],
+      "usage": { "inputTokens": 6322, "outputTokens": 9490, "cacheReadTokens": 48128, "reasoningTokens": 7982 },
+      "compactionId": "f4327d73-1dc3-441d-947e-8ff7cb448713",
+      "archiveLocator": "/var/folders/43/c8m594_s5dldymsklkkq2m8r0000gn/T/dsh-spill-PYCAvK/session-62fcfc9e23c4/e1e1582474dd-ab-baseline.txt",
+      "note": "stock engine, region-only summarization input; miss = region messages + instruction"
+    },
+    {
+      "run": 3,
+      "engine": "patched",
+      "boundarySeqs": { "start": 101552, "end": 123174 },
+      "shadowedTokenCount": 33751,
+      "shadowedSeqs": [101552, 106833, 106836, 106859, 106861, 109730, 109736, 112028, 112030, 112032, 112211, 112213, 112396, 112398, 112509, 112511, 112914, 112916, 113002, 113004, 113619, 113621, 113700, 113702, 120155, 120157, 120198, 120200, 120653, 120655, 120864, 120866, 121921, 121923, 122559, 122562, 123174],
+      "usage": { "inputTokens": 6289, "outputTokens": 1819, "cacheReadTokens": 66688, "reasoningTokens": 0 },
+      "compactionId": "be91c6df-63e1-42fe-8d0e-0b6ddc568e0b",
+      "archiveLocator": "/var/folders/43/c8m594_s5dldymsklkkq2m8r0000gn/T/dsh-spill-PYCAvK/session-62fcfc9e23c4/980d17f6c633-ab-patched2.txt",
+      "engineDiag": { "surfaceNodes": 178, "sentMessages": 62, "sentChars": 122492, "skippedEvents": 0, "k": 26, "m": 62, "regionStart": 101552, "regionEnd": 123174 },
+      "note": "third compaction of the same turn; surface already contains two checkpoints from runs 1-2, so prefix diverges from the last request (contaminated measurement)"
+    }
+  ],
+  "failedAttempt": {
+    "engine": "patched",
+    "boundarySeqs": { "start": 81778, "end": 87981 },
+    "error": "summarization truncated at the token cap (incomplete checkpoint)",
+    "cause": "deepseek-v4-flash thinking mode consumes the 8192 maxTokens budget; fixed by raising to max(engine config, 16384) + adding a conciseness constraint (target < 2000 output tokens)"
+  },
+  "keyResults": {
+    "cleanInputCostSaving": "patched ¥0.001415 vs original ¥0.007285 → 80.6% cheaper on input (run1 vs run2)",
+    "perRegionTokenInputCost": "patched ¥0.114 per M shadowed tokens vs original ¥0.289 → 2.5x cheaper",
+    "missStructure": "patched miss ≈ instruction only (470 tokens), constant regardless of region size; original miss ≈ region messages, grows with region",
+    "extrapolatedSameRegion25K": "patched ≈ ¥0.0014, original ≈ ¥0.0073 → ~81% cheaper",
+    "cacheHitRatio": "patched 99.0% (clean) vs original 88.4%",
+    "outputDominates": "output (incl. reasoning) is 86% of per-compaction cost; engine-independent (thinking mode toggles stochastically: 3621 / 7982 / 0 reasoning tokens)"
+  },
+  "sameTurnPrefixDivergence": "consecutive compactions within one model turn replace spans with checkpoints; the full-context input then diverges from the last routed request at the first new checkpoint, so later runs in the same turn temporarily miss from that position. The next request re-anchors the surface and cache reuse recovers.",
+  "markerAntiPattern": "inserting <compaction-region-start/end> markers into the message stream breaks prefix matching from the marker onward (estimated ~67% MORE expensive than stock); boundary info must live in the trailing instruction as 1-based message indices (#k..#m)"
+}
