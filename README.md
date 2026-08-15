@@ -6,23 +6,13 @@ Context compression for [DeepSeek Harness](https://github.com/deepseek-ai/deepse
 
 ## Why
 
-Compaction is normally a full-context sweep: the official engine only ever compresses from the start of the conversation, so the opening's task plan and direction are **partially lost along with the compressed information**. `context_compact` compresses **only the span the agent selects** — a finished step, a debugged log exchange, an off-track discussion — while the important opening and the recent context stay intact. Span compaction keeps **information loss from compaction as small as possible**: the agent decides what is truly dead, and only that gets condensed.
+Compaction is normally a full-context sweep: the official engine only ever compresses from the start of the conversation, so the opening's task plan and direction are **partially lost along with the compressed information**. `context_compact` compresses **only the span the agent selects** — a finished step, a debugged log exchange, an off-track discussion — while the important opening and the recent context stay intact. Span compaction keeps **information loss from compaction as small as possible** — like human memory, the middle is not compressed indiscriminately: what can be summarized is consolidated into a checkpoint, and important details stay word-for-word — the agent decides what is truly dead, and only that gets condensed.
 
 Typical moments to use it:
 
 - a task step is done — compress it, keep the remaining steps and the active instruction live;
 - a bug hunt or a wrong research direction is over — compress that exchange into a short "what went wrong / root cause / fix" note;
 - the opening requirements are stale — compress the start and restate the current intent.
-
-## Managing context like human memory
-
-People work the same way: recent events are remembered clearest and kept as-is; the middle is never wiped wholesale — what can be summarized becomes key points, while important details are remembered word-for-word. `context_compact` lets the agent manage the conversation the same way:
-
-- **Recent context** — stays verbatim, untouched;
-- **The middle** — not compressed indiscriminately: what can be summarized (a finished step, a debugged log exchange, an off-track discussion) is consolidated into a checkpoint, and important details are kept **word-for-word** inside the checkpoint;
-- **The opening direction** — the task plan and intent stay intact.
-
-Compression is therefore not "losing information" but **selective consolidation**, like memory: forgettable parts get summarized, and what matters keeps every word.
 
 ## What it does
 
