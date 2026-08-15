@@ -13,6 +13,7 @@ import Schema from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import { createShadowUserMessage } from './shadow-message.js'
 import { patchEngine } from './optimizer.js'
+import { normText } from './normalize.js'
 import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode } from './optimizer.js'
 
 export const name = 'tool-context-compression'
@@ -212,18 +213,18 @@ export function apply(ctx: Context, config: Config) {
   // tool-call/result boundaries (start back to the pair opener, end forward
   // through the closing results) so the engine's balance check passes.
 
-  function normText(s: string): string {
-    return s.replace(/\s+/g, ' ').trim()
-  }
+  // normText comes from ./normalize.ts: whitespace-collapsed, CJK full-width
+  // punctuation mapped to half-width, applied to BOTH anchors and node text.
 
   // Tolerant variant: drop the [tool-call <name>] / [tool-result( error)] markers
   // the renderer adds, so the model may paste content with or without them.
+  // Routed through normText so punctuation normalization applies here too.
   function strippedText(s: string): string {
-    return s
-      .replace(/\[tool-call\s+[^\]]*\]\s*/g, '')
-      .replace(/\[tool-result(?:\s+error)?\]\s*/g, '')
-      .replace(/\s+/g, ' ')
-      .trim()
+    return normText(
+      s
+        .replace(/\[tool-call\s+[^\]]*\]\s*/g, '')
+        .replace(/\[tool-result(?:\s+error)?\]\s*/g, ''),
+    )
   }
 
   // UNIQUE-PREFIX matching: an anchor must be a normalized prefix of EXACTLY
@@ -445,10 +446,10 @@ export function apply(ctx: Context, config: Config) {
 
   disposers.push(tools.register(defineTool({
     name: 'context_compact',
-    description: 'Compress a span of past conversation into a single Markdown checkpoint that YOU write. The raw span is archived to a spill artifact, replaced by your checkpoint, and the compaction is recorded. Locate the span by anchors: endAnchor (REQUIRED — verbatim opening of the LAST message of the span; that node itself is replaced, so pass its predecessor\'s opening to keep it) and startAnchor (verbatim opening of the FIRST message; REQUIRED to compress a MIDDLE span — omitting it starts at the very first node, which discards the opening requirements and direction unless you intend a rebaseline). When to compact: Progress (most common) — the opening defined the task order and you executed in sequence; compact each finished step at its topic boundary, keeping the active instruction and remaining steps live. Course correction — the conversation drifted and accumulated noise; compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying the junk forward. Rebaseline — the opening requirements are stale (the user\'s needs evolved); the start itself may be compacted, and the checkpoint then restates the CURRENT intent and what survives, superseding the old opening. Checkpoint conventions (adapt to the scene): Markdown, terse bullets, ## sections; preserve exact paths/commands/ids and the user\'s requirements and direction. Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step. Correction: what went wrong, root cause, the fix, what to keep doing next. Rebaseline: current intent, surviving decisions, plan ahead. Constraints: each anchor must be a unique prefix of exactly one message (whitespace-insensitive, [tool-*] markers ignored); edges snap to balanced tool-call/result boundaries; the engine rejects a checkpoint not smaller than the compressed span; one compaction per session at a time.',
+    description: 'Compress a span of past conversation into a single Markdown checkpoint that YOU write. The raw span is archived to a spill artifact, replaced by your checkpoint, and the compaction is recorded. Locate the span by anchors: endAnchor (REQUIRED — verbatim opening of the LAST message of the span; that node itself is replaced, so pass its predecessor\'s opening to keep it) and startAnchor (verbatim opening of the FIRST message; REQUIRED to compress a MIDDLE span — omitting it starts at the very first node, which discards the opening requirements and direction unless you intend a rebaseline). When to compact: Progress (most common) — the opening defined the task order and you executed in sequence; compact each finished step at its topic boundary, keeping the active instruction and remaining steps live. Course correction — the conversation drifted and accumulated noise; compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying the junk forward. Rebaseline — the opening requirements are stale (the user\'s needs evolved); the start itself may be compacted, and the checkpoint then restates the CURRENT intent and what survives, superseding the old opening. Checkpoint conventions (adapt to the scene): Markdown, terse bullets, ## sections; preserve exact paths/commands/ids and the user\'s requirements and direction. Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step. Correction: what went wrong, root cause, the fix, what to keep doing next. Rebaseline: current intent, surviving decisions, plan ahead. Constraints: each anchor must be a unique prefix of exactly one message (whitespace-insensitive, [tool-*] markers ignored, CJK full-width punctuation normalized to half-width); edges snap to balanced tool-call/result boundaries; the engine rejects a checkpoint not smaller than the compressed span; one compaction per session at a time.',
     parameters: {
-      startAnchor: { type: 'string', description: 'Verbatim OPENING of the FIRST node of the span; must be a unique prefix of exactly one user/assistant message (whitespace-insensitive, [tool-*] markers ignored). REQUIRED to compress a MIDDLE span. WARNING: omitting it starts the span at the very FIRST node of the conversation, discarding the opening requirements and direction — only omit it when you deliberately want to compress ALL history up to endAnchor, or when the opening requirements are stale and you intend a rebaseline.' },
-      endAnchor: { type: 'string', description: 'REQUIRED. Verbatim OPENING of the LAST node of the span (unique prefix of exactly one message). That node itself is replaced — pass its predecessor\'s opening to keep it.' },
+      startAnchor: { type: 'string', description: 'Verbatim OPENING of the FIRST node of the span; must be a unique prefix of exactly one user/assistant message (whitespace-insensitive, [tool-*] markers ignored, CJK full-width punctuation normalized to half-width). REQUIRED to compress a MIDDLE span. WARNING: omitting it starts the span at the very FIRST node of the conversation, discarding the opening requirements and direction — only omit it when you deliberately want to compress ALL history up to endAnchor, or when the opening requirements are stale and you intend a rebaseline.' },
+      endAnchor: { type: 'string', description: 'REQUIRED. Verbatim OPENING of the LAST node of the span (unique prefix of exactly one message; whitespace and punctuation-width insensitive, [tool-*] markers ignored). That node itself is replaced — pass its predecessor\'s opening to keep it.' },
       summary: { type: 'string', description: 'REQUIRED. The full Markdown checkpoint that replaces the span, written by YOU from the conversation content. Adapt the structure to the scene: Progress → ## sections Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction → what went wrong, root cause, the fix, what to keep doing next; Rebaseline → current intent, surviving decisions, plan ahead. Always: terse bullets; preserve exact paths/commands/identifiers and the user\'s requirements and direction; never a verbatim copy of the span (the engine rejects a summary not smaller than the compressed content).' },
     },
     output: {
