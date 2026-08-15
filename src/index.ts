@@ -181,17 +181,156 @@ export function apply(ctx: Context, config: PluginConfig) {
     return '?'
   }
 
-  function findBoundaries(nodes: SurfaceNode[], startSeq: number, endSeq: number): { error: string } | { si: number; ei: number } {
+  // ---- anchor-based boundary resolution ----
+  // The model can skip context_surface entirely: it passes verbatim text of
+  // the first node (startAnchor) and/or last node (endAnchor) of the span, and
+  // the tool locates the seqs by normalized text match on the CURRENT surface.
+  // Anchors resolve afresh on every call, so repeated compactions never go
+  // stale after earlier checkpoints replaced old nodes. Boundary seqs still
+  // win when both are given. Matched edges are snapped to balanced
+  // tool-call/result boundaries (start back to the pair opener, end forward
+  // through the closing results) so the engine's balance check passes.
+
+  function findSeqIndex(nodes: SurfaceNode[], seq: number): number {
+    for (let i = 0; i < nodes.length; i++) {
+      if (nodes[i].seq === seq) return i
+    }
+    return -1
+  }
+
+  function normText(s: string): string {
+    return s.replace(/\s+/g, ' ').trim()
+  }
+
+  // Tolerant variant: drop the [tool-call <name>] / [tool-result( error)] markers
+  // the renderer adds, so the model may paste content with or without them.
+  function strippedText(s: string): string {
+    return s
+      .replace(/\[tool-call\s+[^\]]*\]\s*/g, '')
+      .replace(/\[tool-result(?:\s+error)?\]\s*/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
+  // exact (3) > prefix (2) > contains (1); -1 = no match
+  function matchScore(nodeRaw: string, anchorNorm: string): number {
+    if (!anchorNorm) return -1
+    const n = normText(nodeRaw)
+    const s = strippedText(nodeRaw)
+    if (n === anchorNorm || s === anchorNorm) return 3
+    if (n.startsWith(anchorNorm) || s.startsWith(anchorNorm)) return 2
+    if (n.includes(anchorNorm) || s.includes(anchorNorm)) return 1
+    return -1
+  }
+
+  function findAnchorIndex(nodes: SurfaceNode[], anchor: string, prefer: 'first' | 'last'): number {
+    const a = normText(anchor)
+    let best = -1
+    let bestScore = -1
+    for (let i = 0; i < nodes.length; i++) {
+      const score = matchScore(nodeText(nodes[i]), a)
+      if (score < 0) continue
+      if (prefer === 'last') {
+        if (score >= bestScore) {
+          bestScore = score
+          best = i
+        }
+      } else if (score > bestScore) {
+        bestScore = score
+        best = i
+      }
+    }
+    return best
+  }
+
+  function snapStartBalanced(nodes: SurfaceNode[], si: number): number {
+    // A tool/result must not open the span without its assistant message:
+    // walk back to the nearest assistant/message that issued the calls.
+    while (si > 0 && nodes[si].type === 'tool/result') {
+      let j = si - 1
+      while (j > 0 && nodes[j].type !== 'assistant/message') j--
+      if (nodes[j].type !== 'assistant/message') break
+      si = j
+    }
+    return si
+  }
+
+  function snapEndBalanced(nodes: SurfaceNode[], ei: number): number {
+    // An assistant/message edge stays open while its tool results follow;
+    // consecutive tool/result nodes belong to the same pair, so advance
+    // through ALL of them until the pair is fully closed.
+    while (ei < nodes.length - 1 && nodes[ei + 1].type === 'tool/result') {
+      ei++
+    }
+    return ei
+  }
+
+  interface BoundaryResolveResult {
+    si: number
+    ei: number
+    startSeq: number
+    endSeq: number
+    method: string
+    detail: { startPos: number; endPos: number }
+  }
+
+  function resolveBoundaries(nodes: SurfaceNode[], args: { start?: unknown; end?: unknown; startAnchor?: unknown; endAnchor?: unknown; fromStart?: unknown }): BoundaryResolveResult {
+    if (!nodes.length) throw new Error('surface is empty; nothing to compact')
+    const startNum = args.start === undefined || args.start === null ? NaN : Number(args.start)
+    const endNum = args.end === undefined || args.end === null ? NaN : Number(args.end)
+    const startOk = Number.isInteger(startNum)
+    const endOk = Number.isInteger(endNum)
+    const startAnchor = typeof args.startAnchor === 'string' && args.startAnchor.trim() ? args.startAnchor : ''
+    const endAnchor = typeof args.endAnchor === 'string' && args.endAnchor.trim() ? args.endAnchor : ''
+    const fromStart = args.fromStart === true
+    if (!startOk && !startAnchor && !fromStart && !endOk) {
+      throw new Error('cannot resolve boundaries: provide start/end seqs, or startAnchor/endAnchor text (or fromStart: true plus endAnchor)')
+    }
     let si = -1
     let ei = -1
-    for (let i = 0; i < nodes.length; i++) {
-      if (nodes[i].seq === startSeq) si = i
-      if (nodes[i].seq === endSeq) ei = i
+    const method: string[] = []
+    if (startOk) {
+      si = findSeqIndex(nodes, startNum)
+      if (si === -1) throw new Error('start seq ' + startNum + ' not found on the current surface')
+      method.push('start=seq')
+    } else if (startAnchor) {
+      si = findAnchorIndex(nodes, startAnchor, 'first')
+      if (si === -1) throw new Error('startAnchor not found on the surface: ' + preview(startAnchor, 120))
+      method.push('start=anchor')
+    } else if (fromStart) {
+      si = 0
+      method.push('start=first')
     }
-    if (si === -1) return { error: 'start seq ' + startSeq + ' not found on the current surface' }
-    if (ei === -1) return { error: 'end seq ' + endSeq + ' not found on the current surface' }
-    if (si > ei) return { error: 'start seq ' + startSeq + ' sits after end seq ' + endSeq + ' on the surface' }
-    return { si: si, ei: ei }
+    if (endOk) {
+      ei = findSeqIndex(nodes, endNum)
+      if (ei === -1) throw new Error('end seq ' + endNum + ' not found on the current surface')
+      method.push('end=seq')
+    } else if (endAnchor) {
+      ei = findAnchorIndex(nodes, endAnchor, 'last')
+      if (ei === -1) throw new Error('endAnchor not found on the surface: ' + preview(endAnchor, 120))
+      method.push('end=anchor')
+    }
+    if (si === -1 || ei === -1) {
+      throw new Error('cannot resolve both boundaries: provide start/end seqs, or startAnchor/endAnchor text (or fromStart: true plus endAnchor)')
+    }
+    if (si > ei) {
+      throw new Error('resolved start sits after resolved end on the surface (start pos ' + si + ', end pos ' + ei + ')')
+    }
+    const snappedStart = snapStartBalanced(nodes, si)
+    const snappedEnd = snapEndBalanced(nodes, ei)
+    if (snappedStart !== si) method.push('start-snapped')
+    if (snappedEnd !== ei) method.push('end-snapped')
+    si = snappedStart
+    ei = snappedEnd
+    if (si > ei) throw new Error('after balancing, start sits after end on the surface (start pos ' + si + ', end pos ' + ei + ')')
+    return {
+      si: si,
+      ei: ei,
+      startSeq: nodes[si].seq,
+      endSeq: nodes[ei].seq,
+      method: method.join(' + '),
+      detail: { startPos: si, endPos: ei },
+    }
   }
 
   function spanText(nodes: SurfaceNode[], si: number, ei: number): string {
@@ -280,10 +419,13 @@ export function apply(ctx: Context, config: PluginConfig) {
 
   disposers.push(tools.register(defineTool({
     name: 'context_archive',
-    description: 'Backup ONLY: save the full raw text of a surface span between boundary seqs [start..end] (inclusive, from context_surface) to a session-scoped spill artifact, without touching the surface. Use it when you want a durable copy of a span you are NOT about to compress yet. When you ARE compacting, context_compact already archives the raw span automatically, so you do not need this tool. Returns a locator plus a retrievalHint that tells how to read the raw text later (e.g. with the read tool) if the summary turns out too thin.',
+    description: 'Backup ONLY: save the full raw text of a surface span to a session-scoped spill artifact, without touching the surface. Locate the span either by boundary seqs (start/end, from context_surface) or by ANCHOR TEXT — copy the verbatim content of the first node (startAnchor) and last node (endAnchor) of the span; the tool resolves them on the CURRENT surface by normalized text match (first occurrence for start, last for end), so anchors never go stale after earlier compactions. Use it when you want a durable copy of a span you are NOT about to compress yet. When you ARE compacting, context_compact already archives the raw span automatically, so you do not need this tool. Returns a locator plus a retrievalHint that tells how to read the raw text later (e.g. with the read tool) if the summary turns out too thin.',
     parameters: {
-      start: { type: 'integer', required: true, description: 'Inclusive start boundary seq (from context_surface) of the span to archive.' },
-      end: { type: 'integer', required: true, description: 'Inclusive end boundary seq (from context_surface) of the span to archive.' },
+      start: { type: 'integer', description: 'Inclusive start boundary seq (from context_surface). Alternative to startAnchor.' },
+      end: { type: 'integer', description: 'Inclusive end boundary seq (from context_surface). Alternative to endAnchor.' },
+      startAnchor: { type: 'string', description: 'Verbatim text of the FIRST node of the span (its beginning). Exact/prefix/contains match, whitespace-insensitive, [tool-*] markers ignored; first occurrence wins. Alternative to start.' },
+      endAnchor: { type: 'string', description: 'Verbatim text of the LAST node of the span (what the span ends with). Matched like startAnchor but last occurrence wins. Alternative to end.' },
+      fromStart: { type: 'boolean', description: 'Start the span at the very first surface node (ignored when start or startAnchor is given).' },
       name: { type: 'string', description: 'Suggested artifact base name, e.g. wrong-direction-analysis.txt (backend sanitizes it to one safe path segment).' },
     },
     output: {
@@ -297,18 +439,13 @@ export function apply(ctx: Context, config: PluginConfig) {
       if (!spillStore) throw new Error('spillStore service is not available in this runtime (tried host plane and preset realm)')
       const nodes = await readSurfaceNodes(agent)
       if (nodes === null) throw new Error('sessionQuery service is not available in this runtime')
-      const startSeq = Number(args.start)
-      const endSeq = Number(args.end)
-      if (!Number.isInteger(startSeq) || !Number.isInteger(endSeq)) {
-        throw new Error('invalid boundary seqs: got start=' + args.start + ' end=' + args.end)
-      }
-      const b = findBoundaries(nodes, startSeq, endSeq)
-      if ('error' in b) throw new Error(b.error)
+      const b = resolveBoundaries(nodes, args)
       const ref = await archiveSpan(agent, spillStore, nodes, b.si, b.ei, typeof args.name === 'string' && args.name ? args.name : 'context-archive.txt')
       if (!ref) throw new Error('spillStore failed to save the span')
       return {
         sessionId: agent.session.id,
-        boundarySeqs: { start: startSeq, end: endSeq },
+        boundarySeqs: { start: b.startSeq, end: b.endSeq },
+        boundaryMethod: b.method,
         archivedSeqs: ref.archivedSeqs,
         chars: ref.chars,
         locator: ref.locator,
@@ -320,10 +457,13 @@ export function apply(ctx: Context, config: PluginConfig) {
 
   disposers.push(tools.register(defineTool({
     name: 'context_compact',
-    description: 'Agent-controlled context compression, one step: FIRST saves the full raw text of the surface span between boundary seqs [start..end] (inclusive, from context_surface) to a session-scoped spill artifact (auto-archive), THEN replaces the span with ONE summary node. The compaction engine is upgraded by this plugin: the summarization input is the FULL context up to the region end (maximizing KV-cache reuse via a genuine prefix of the last routed request) plus a scoped instruction that compresses only messages #k..#m. Constraints enforced by the backend: both boundary seqs must exist on the current surface, start must sit at or before end, both edges must be balanced (never split an assistant tool-call/result pair, end boundary step must be closed), and only one compaction may run per session at a time. Keep the still-active user instruction out of the range. After success, re-run context_surface to see the new checkpoint node and re-map seqs.',
+    description: 'Agent-controlled context compression, one step: FIRST saves the full raw text of the surface span to a session-scoped spill artifact (auto-archive), THEN replaces the span with ONE summary node. Locate the span either by boundary seqs (start/end, from context_surface) or by ANCHOR TEXT — no context_surface call needed: copy the verbatim content of the first node (startAnchor) and/or last node (endAnchor) of the span, e.g. the leading lines of your own last tool result; the tool resolves them on the CURRENT surface by normalized text match (first occurrence for start, last for end), so repeated compactions never hit stale seqs. Omit start entirely by passing fromStart: true. Matched edges are snapped to balanced tool-call/result boundaries. The compaction engine is upgraded by this plugin: the summarization input is the FULL context up to the region end (maximizing KV-cache reuse via a genuine prefix of the last routed request) plus a scoped instruction that compresses only messages #k..#m. Constraints enforced by the backend: both boundary seqs must exist on the current surface, start must sit at or before end, both edges must be balanced (never split an assistant tool-call/result pair, end boundary step must be closed), and only one compaction may run per session at a time. Keep the still-active user instruction out of the range.',
     parameters: {
-      start: { type: 'integer', required: true, description: 'Inclusive start boundary seq (from context_surface) of the span to compress.' },
-      end: { type: 'integer', required: true, description: 'Inclusive end boundary seq (from context_surface) of the span to compress.' },
+      start: { type: 'integer', description: 'Inclusive start boundary seq (from context_surface). Alternative to startAnchor / fromStart.' },
+      end: { type: 'integer', description: 'Inclusive end boundary seq (from context_surface). Alternative to endAnchor.' },
+      startAnchor: { type: 'string', description: 'Verbatim text of the FIRST node of the span (its beginning). Exact/prefix/contains match, whitespace-insensitive, [tool-*] markers ignored; first occurrence wins. Alternative to start.' },
+      endAnchor: { type: 'string', description: 'Verbatim text of the LAST node of the span (what the span ends with). Matched like startAnchor but last occurrence wins. Alternative to end.' },
+      fromStart: { type: 'boolean', description: 'Start the span at the very first surface node (ignored when start or startAnchor is given).' },
       note: { type: 'string', description: 'Optional short note: why this range is finished and what the summary must preserve for later steps. Echoed in the result only.' },
       name: { type: 'string', description: 'Optional suggested archive file name for the auto-archived raw copy (backend sanitizes it). Default: context-compacted-<start>-<end>.txt.' },
     },
@@ -337,15 +477,11 @@ export function apply(ctx: Context, config: PluginConfig) {
       const engine = resolveService(agent, 'compaction') as CompactionLike | undefined
       if (!engine) throw new Error('compaction service is not available in this runtime (tried host plane and preset realm)')
       patchEngine(engine as unknown as OptimizedEngineLike, { maxTokens: config.maxTokens })
-      const startSeq = Number(args.start)
-      const endSeq = Number(args.end)
-      if (!Number.isInteger(startSeq) || !Number.isInteger(endSeq)) {
-        throw new Error('invalid boundary seqs: got start=' + args.start + ' end=' + args.end)
-      }
       const nodes = await readSurfaceNodes(agent)
       if (nodes === null) throw new Error('sessionQuery service is not available in this runtime')
-      const b = findBoundaries(nodes, startSeq, endSeq)
-      if ('error' in b) throw new Error(b.error)
+      const b = resolveBoundaries(nodes, args)
+      const startSeq = b.startSeq
+      const endSeq = b.endSeq
 
       const spillStore = resolveService(agent, 'spillStore') as SpillStoreLike | undefined
       const defaultName = 'context-compacted-' + startSeq + '-' + endSeq + '.txt'
@@ -374,6 +510,7 @@ export function apply(ctx: Context, config: PluginConfig) {
         sessionId: string
         compactionId: JsonValue
         boundarySeqs: { start: number; end: number }
+        boundaryMethod: string
         shadowedRange: { start: number; end: number } | null
         shadowedSeqs: JsonValue[]
         shadowedTokenCount: JsonValue | null
@@ -389,6 +526,7 @@ export function apply(ctx: Context, config: PluginConfig) {
         sessionId: agent.session.id,
         compactionId: result.compactionId,
         boundarySeqs: { start: startSeq, end: endSeq },
+        boundaryMethod: b.method,
         shadowedRange: result.shadowedRange ? { start: result.shadowedRange.start, end: result.shadowedRange.end } : null,
         shadowedSeqs: Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs : [],
         shadowedTokenCount: result.shadowedTokenCount ?? null,
@@ -420,3 +558,4 @@ export function apply(ctx: Context, config: PluginConfig) {
     }
   }
 }
+
