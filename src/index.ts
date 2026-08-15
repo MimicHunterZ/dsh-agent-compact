@@ -198,18 +198,23 @@ export function apply(ctx: Context, config: PluginConfig) {
   }
 
   // UNIQUE-PREFIX matching: an anchor must be a normalized prefix of EXACTLY
-  // ONE surface node, so a replacement can never silently land on the wrong
-  // node. Zero hits -> "not found" with closest-node hints; more than one hit
-  // -> "ambiguous" listing every candidate so the caller lengthens the anchor.
+  // ONE message node (user/message or assistant/message), so a replacement can
+  // never silently land on the wrong node. tool/result nodes are NOT matched:
+  // their caller lives inside the preceding assistant message, so anchoring a
+  // message keeps whole tool pairs together (snap* helpers close the edges).
+  // Zero hits -> "not found" with closest-node hints; more than one hit ->
+  // "ambiguous" listing every candidate so the caller lengthens the anchor.
   // The current in-flight turn's own tool-call node (its arguments are part of
   // the surface) is excluded: it is an open, unbalanced step, never a boundary.
   function prefixHits(nodes: SurfaceNode[], anchor: string): number[] {
     const a = normText(anchor)
     const hits: number[] = []
     for (let i = 0; i < nodes.length; i++) {
-      if (i === nodes.length - 1 && /\[tool-call/.test(nodeText(nodes[i]))) continue
-      const n = normText(nodeText(nodes[i]))
-      const s = strippedText(nodeText(nodes[i]))
+      const node = nodes[i]
+      if (node.type !== 'user/message' && node.type !== 'assistant/message') continue
+      if (i === nodes.length - 1 && /\[tool-call/.test(nodeText(node))) continue
+      const n = normText(nodeText(node))
+      const s = strippedText(nodeText(node))
       if (n.startsWith(a) || s.startsWith(a)) hits.push(i)
     }
     return hits
@@ -425,12 +430,12 @@ export function apply(ctx: Context, config: PluginConfig) {
         boundaryMethod: string
         surfaceTotal: number
         shadowedRange: { start: number; end: number } | null
-        shadowedSeqs: JsonValue[]
+        shadowedCount: number
         shadowedTokenCount: JsonValue | null
         summary: string
         usage: JsonValue | null
         engineDiag: JsonValue | null
-        archived: SurfaceArchive | null
+        archived: JsonValue | null
         archiveError: JsonValue | null
         advice: string
         note?: string
@@ -442,7 +447,7 @@ export function apply(ctx: Context, config: PluginConfig) {
         boundaryMethod: b.method,
         surfaceTotal: nodes.length,
         shadowedRange: result.shadowedRange ? { start: result.shadowedRange.start, end: result.shadowedRange.end } : null,
-        shadowedSeqs: Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs : [],
+        shadowedCount: Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs.length : 0,
         shadowedTokenCount: result.shadowedTokenCount ?? null,
         summary: blocksText(Array.isArray(result.summary) ? result.summary : null, 0).replace(/\n+$/, ''),
         usage: usage,
@@ -452,7 +457,7 @@ export function apply(ctx: Context, config: PluginConfig) {
           bytes: archived.bytes,
           retrievalHint: archived.retrievalHint,
           chars: archived.chars,
-          archivedSeqs: archived.archivedSeqs,
+          archivedSeqs: archived.archivedSeqs.length,
         } : null,
         archiveError: archiveError,
         advice: 'The span is now one summary checkpoint node and the surface shrank (see surfaceTotal). If the summary turns out too thin, read the archived raw copy using the retrievalHint.',
