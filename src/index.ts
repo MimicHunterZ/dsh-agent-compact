@@ -422,47 +422,25 @@ export function apply(ctx: Context, config: PluginConfig) {
         throw new Error('compaction rejected range [' + startSeq + ',' + endSeq + ']: ' + msg)
       }
       const usage = findSummaryUsage(agent.session, result.compactionId)
+      // Debug/introspection metrics go to the log, never into the model-visible
+      // tool result (DSH tool convention: the execute return IS what the model
+      // sees, so it must stay minimal — see bash/read/goal tools).
+      ctx.logger.info('[context_compact] %s span %d..%d (%s), shadowed %d nodes / %s tokens, surface %d -> after, usage=%o, diag=%o', agent.session.id, startSeq, endSeq, b.method, Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs.length : 0, String(result.shadowedTokenCount ?? '?'), nodes.length, usage, engine._lastDiag)
+      const summary = blocksText(Array.isArray(result.summary) ? result.summary : null, 0).replace(/\n+$/, '')
       const out: {
         ok: boolean
-        sessionId: string
-        compactionId: JsonValue
-        boundarySeqs: { start: number; end: number }
-        boundaryMethod: string
-        surfaceTotal: number
-        shadowedRange: { start: number; end: number } | null
-        shadowedCount: number
-        shadowedTokenCount: JsonValue | null
         summary: string
-        usage: JsonValue | null
-        engineDiag: JsonValue | null
-        archived: JsonValue | null
-        archiveError: JsonValue | null
-        advice: string
-        note?: string
+        archived: { locator: JsonValue; retrievalHint: JsonValue } | null
+        archiveError?: string
       } = {
         ok: true,
-        sessionId: agent.session.id,
-        compactionId: result.compactionId,
-        boundarySeqs: { start: startSeq, end: endSeq },
-        boundaryMethod: b.method,
-        surfaceTotal: nodes.length,
-        shadowedRange: result.shadowedRange ? { start: result.shadowedRange.start, end: result.shadowedRange.end } : null,
-        shadowedCount: Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs.length : 0,
-        shadowedTokenCount: result.shadowedTokenCount ?? null,
-        summary: blocksText(Array.isArray(result.summary) ? result.summary : null, 0).replace(/\n+$/, ''),
-        usage: usage,
-        engineDiag: engine._lastDiag ? (engine._lastDiag as JsonValue) : null,
+        summary: summary,
         archived: archived ? {
           locator: archived.locator,
-          bytes: archived.bytes,
           retrievalHint: archived.retrievalHint,
-          chars: archived.chars,
-          archivedSeqs: archived.archivedSeqs.length,
         } : null,
-        archiveError: archiveError,
-        advice: 'The span is now one summary checkpoint node and the surface shrank (see surfaceTotal). If the summary turns out too thin, read the archived raw copy using the retrievalHint.',
       }
-      if (typeof args.note === 'string') out.note = args.note
+      if (archiveError) out.archiveError = typeof archiveError === 'string' ? archiveError : String(archiveError)
       return out
     },
   })))
