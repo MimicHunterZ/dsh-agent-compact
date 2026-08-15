@@ -1,4 +1,4 @@
-# @mimichunterz/agent-compact
+# agent-compact
 
 [English](README.md) · 简体中文
 
