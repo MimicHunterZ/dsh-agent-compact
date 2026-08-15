@@ -183,13 +183,6 @@ export function apply(ctx: Context, config: PluginConfig) {
   // tool-call/result boundaries (start back to the pair opener, end forward
   // through the closing results) so the engine's balance check passes.
 
-  function findSeqIndex(nodes: SurfaceNode[], seq: number): number {
-    for (let i = 0; i < nodes.length; i++) {
-      if (nodes[i].seq === seq) return i
-    }
-    return -1
-  }
-
   function normText(s: string): string {
     return s.replace(/\s+/g, ' ').trim()
   }
@@ -204,37 +197,37 @@ export function apply(ctx: Context, config: PluginConfig) {
       .trim()
   }
 
-  // exact (3) > prefix (2) > contains (1); -1 = no match
-  // contains is only allowed for anchors long enough to be distinctive, so a
-  // short anchor (e.g. a user message like "继续") cannot spray-match nodes.
-  function matchScore(nodeRaw: string, anchorNorm: string): number {
-    if (!anchorNorm) return -1
-    const n = normText(nodeRaw)
-    const s = strippedText(nodeRaw)
-    if (n === anchorNorm || s === anchorNorm) return 3
-    if (n.startsWith(anchorNorm) || s.startsWith(anchorNorm)) return 2
-    if (anchorNorm.length >= 24 && (n.includes(anchorNorm) || s.includes(anchorNorm))) return 1
-    return -1
+  // UNIQUE-PREFIX matching: an anchor must be a normalized prefix of EXACTLY
+  // ONE surface node, so a replacement can never silently land on the wrong
+  // node. Zero hits -> "not found" with closest-node hints; more than one hit
+  // -> "ambiguous" listing every candidate so the caller lengthens the anchor.
+  // The current in-flight turn's own tool-call node (its arguments are part of
+  // the surface) is excluded: it is an open, unbalanced step, never a boundary.
+  function prefixHits(nodes: SurfaceNode[], anchor: string): number[] {
+    const a = normText(anchor)
+    const hits: number[] = []
+    for (let i = 0; i < nodes.length; i++) {
+      if (i === nodes.length - 1 && /\[tool-call/.test(nodeText(nodes[i]))) continue
+      const n = normText(nodeText(nodes[i]))
+      const s = strippedText(nodeText(nodes[i]))
+      if (n.startsWith(a) || s.startsWith(a)) hits.push(i)
+    }
+    return hits
   }
 
-  function findAnchorIndex(nodes: SurfaceNode[], anchor: string, prefer: 'first' | 'last'): number {
-    const a = normText(anchor)
-    let best = -1
-    let bestScore = -1
-    for (let i = 0; i < nodes.length; i++) {
-      const score = matchScore(nodeText(nodes[i]), a)
-      if (score < 0) continue
-      if (prefer === 'last') {
-        if (score >= bestScore) {
-          bestScore = score
-          best = i
-        }
-      } else if (score > bestScore) {
-        bestScore = score
-        best = i
-      }
+  function hitPreview(nodes: SurfaceNode[], hits: number[]): string {
+    return hits.map((i) => 'pos ' + i + ' | seq ' + nodes[i].seq + ' | ' + nodes[i].type + ': ' + preview(nodeText(nodes[i]), 80)).join('\n')
+  }
+
+  // Resolve one anchor to a unique node index, throwing with actionable hints.
+  function resolveUniqueHit(nodes: SurfaceNode[], anchor: string, side: string): number {
+    const hits = prefixHits(nodes, anchor)
+    if (hits.length === 1) return hits[0]
+    if (hits.length === 0) {
+      const hint = nearestHint(nodes, normText(anchor))
+      throw new Error(side + ' not found on the surface: ' + preview(anchor, 120) + (hint ? '\nclosest nodes:\n' + hint : ''))
     }
-    return best
+    throw new Error(side + ' is AMBIGUOUS: ' + hits.length + ' nodes start with it. Lengthen the anchor to pick one:\n' + hitPreview(nodes, hits))
   }
 
   function snapStartBalanced(nodes: SurfaceNode[], si: number): number {
@@ -291,60 +284,25 @@ export function apply(ctx: Context, config: PluginConfig) {
     return scored.map((s) => 'pos ' + s.i + ' | seq ' + nodes[s.i].seq + ' | ' + nodes[s.i].type + ': ' + preview(nodeText(nodes[s.i]), 80)).join('\n')
   }
 
-  // An anchor can accidentally match the CURRENT in-flight turn's tool-call
-  // node (the call's own arguments become part of the surface). That node is
-  // not a usable boundary: its results have not landed yet and it is an open,
-  // unbalanced step. Skip it and keep looking at earlier nodes.
-  function findAnchorIndexSkippingOpen(nodes: SurfaceNode[], anchor: string, prefer: 'first' | 'last'): number {
-    const idx = findAnchorIndex(nodes, anchor, prefer)
-    if (idx === nodes.length - 1 && /\[tool-call/.test(nodeText(nodes[idx]))) {
-      return findAnchorIndex(nodes.slice(0, -1), anchor, prefer)
-    }
-    return idx
-  }
-
-  function resolveBoundaries(nodes: SurfaceNode[], args: { start?: unknown; end?: unknown; startAnchor?: unknown; endAnchor?: unknown }): BoundaryResolveResult {
+  function resolveBoundaries(nodes: SurfaceNode[], args: { startAnchor?: unknown; endAnchor?: unknown }): BoundaryResolveResult {
     if (!nodes.length) throw new Error('surface is empty; nothing to compact')
-    const startNum = args.start === undefined || args.start === null ? NaN : Number(args.start)
-    const endNum = args.end === undefined || args.end === null ? NaN : Number(args.end)
-    const startOk = Number.isInteger(startNum)
-    const endOk = Number.isInteger(endNum)
     const startAnchor = typeof args.startAnchor === 'string' && args.startAnchor.trim() ? args.startAnchor : ''
     const endAnchor = typeof args.endAnchor === 'string' && args.endAnchor.trim() ? args.endAnchor : ''
     // The end side is REQUIRED to bound the span; start defaults to the first node.
-    if (!endOk && !endAnchor) {
-      throw new Error('cannot resolve the end boundary: provide end (seq) or endAnchor (verbatim text of the LAST node of the span to compress; that node itself is compressed — use its predecessor to keep it)')
+    if (!endAnchor) {
+      throw new Error('cannot resolve the end boundary: provide endAnchor — verbatim text that is a UNIQUE PREFIX of the LAST node of the span to compress (that node itself is compressed; use its predecessor to keep it)')
     }
-    let si = -1
-    let ei = -1
     const method: string[] = []
-    if (startOk) {
-      si = findSeqIndex(nodes, startNum)
-      if (si === -1) throw new Error('start seq ' + startNum + ' not found on the current surface')
-      method.push('start=seq')
-    } else if (startAnchor) {
-      si = findAnchorIndexSkippingOpen(nodes, startAnchor, 'first')
-      if (si === -1) {
-        const hint = nearestHint(nodes, normText(startAnchor))
-        throw new Error('startAnchor not found on the surface: ' + preview(startAnchor, 120) + (hint ? '\nclosest nodes:\n' + hint : ''))
-      }
+    let si: number
+    if (startAnchor) {
+      si = resolveUniqueHit(nodes, startAnchor, 'startAnchor')
       method.push('start=anchor')
     } else {
       si = 0
       method.push('start=first')
     }
-    if (endOk) {
-      ei = findSeqIndex(nodes, endNum)
-      if (ei === -1) throw new Error('end seq ' + endNum + ' not found on the current surface')
-      method.push('end=seq')
-    } else {
-      ei = findAnchorIndexSkippingOpen(nodes, endAnchor, 'last')
-      if (ei === -1) {
-        const hint = nearestHint(nodes, normText(endAnchor))
-        throw new Error('endAnchor not found on the surface: ' + preview(endAnchor, 120) + (hint ? '\nclosest nodes:\n' + hint : ''))
-      }
-      method.push('end=anchor')
-    }
+    let ei = resolveUniqueHit(nodes, endAnchor, 'endAnchor')
+    method.push('end=anchor')
     if (si > ei) {
       throw new Error('resolved start sits after resolved end on the surface (start pos ' + si + ', end pos ' + ei + ')')
     }
@@ -414,12 +372,10 @@ export function apply(ctx: Context, config: PluginConfig) {
 
   disposers.push(tools.register(defineTool({
     name: 'context_compact',
-    description: 'Agent-controlled context compression, one step: FIRST saves the full raw text of the surface span to a session-scoped spill artifact (auto-archive), THEN replaces the span with ONE summary checkpoint node. Locate the span by ANCHOR TEXT — no context_surface call needed: copy the verbatim content of the LAST node of the span as endAnchor (e.g. the leading lines of your own last tool result); the tool resolves it on the CURRENT surface by normalized text match (exact > prefix > contains, whitespace-insensitive, [tool-*] markers ignored; LAST occurrence wins) and compresses [firstNode..endAnchor] inclusively — the endAnchor node itself IS compressed, so pass its predecessor to keep it. For a mid-conversation span also pass startAnchor (verbatim content of the FIRST node of the span; FIRST occurrence wins). start/end seqs are optional alternatives. Matched edges are snapped to balanced tool-call/result boundaries. A failed match throws with the closest node previews to help you pick the right text. The compaction engine is upgraded by this plugin: the summarization input is the FULL context up to the region end (maximizing KV-cache reuse via a genuine prefix of the last routed request) plus a scoped instruction that compresses only messages #k..#m. Constraints: both boundary seqs must exist on the current surface, start must sit at or before end, both edges must be balanced (never split an assistant tool-call/result pair, end boundary must be closed), and only one compaction may run per session at a time. Keep the still-active user instruction out of the range. The raw span is archived: read it back later via the returned locator/retrievalHint.',
+    description: 'Agent-controlled context compression, one step: FIRST saves the full raw text of the surface span to a session-scoped spill artifact (auto-archive), THEN replaces the span with ONE summary checkpoint node. Locate the span with ANCHOR TEXT — no context_surface call needed. endAnchor is REQUIRED: copy the verbatim OPENING of the LAST node of the span (e.g. the first sentence of your own message after a tool result); the tool requires it to be a UNIQUE PREFIX of exactly one surface node (whitespace-insensitive, [tool-*] markers ignored) and compresses [firstNode..thatNode] inclusively — the endAnchor node itself IS compressed, so pass its predecessor to keep it. startAnchor (optional, unique prefix of the FIRST node of the span) starts mid-conversation; otherwise the span starts at the very first node. A non-unique anchor is REJECTED: not-found lists the closest nodes, ambiguous lists every candidate so you lengthen the anchor. Matched edges are snapped to balanced tool-call/result boundaries. The compaction engine is upgraded by this plugin: the summarization input is the FULL context up to the region end (maximizing KV-cache reuse via a genuine prefix of the last routed request) plus a scoped instruction that compresses only messages #k..#m. Constraints: both edges must be balanced (never split an assistant tool-call/result pair, end boundary must be closed), and only one compaction may run per session at a time. Keep the still-active user instruction out of the range. The raw span is archived: read it back later via the returned locator/retrievalHint.',
     parameters: {
-      start: { type: 'integer', description: 'Inclusive start boundary seq. Optional — defaults to the very first surface node.' },
-      end: { type: 'integer', description: 'Inclusive end boundary seq (the last node to compress). Alternative to endAnchor.' },
-      startAnchor: { type: 'string', description: 'Verbatim text of the FIRST node of the span (its beginning). Exact/prefix/contains match, whitespace-insensitive, [tool-*] markers ignored; first occurrence wins. Optional — defaults to the first node.' },
-      endAnchor: { type: 'string', description: 'REQUIRED unless end is given. Verbatim text of the LAST node of the span (what the span ends with — that node itself is compressed; pass its predecessor to keep it). Matched like startAnchor but last occurrence wins.' },
+      startAnchor: { type: 'string', description: 'Optional. Verbatim OPENING of the FIRST node of the span; must be a unique prefix of exactly one surface node. Defaults to the very first node.' },
+      endAnchor: { type: 'string', description: 'REQUIRED. Verbatim OPENING of the LAST node of the span (that node itself is compressed; pass its predecessor to keep it). Must be a unique prefix of exactly one surface node.' },
       note: { type: 'string', description: 'Optional short note: why this range is finished and what the summary must preserve for later steps. Echoed in the result only.' },
       name: { type: 'string', description: 'Optional suggested archive file name for the auto-archived raw copy (backend sanitizes it). Default: context-compacted-<start>-<end>.txt.' },
     },
