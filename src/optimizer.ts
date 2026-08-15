@@ -67,14 +67,22 @@ export interface Assembler {
  * real engine is a BasicCompactionEngine, which carries all these members).
  */
 export interface OptimizedEngineLike {
-  _pending?: { start: number; end: number }
+  /**
+   * Region boundaries stashed per session id (never a bare `{start, end}`:
+   * the engine is a host-level singleton shared by every session, so a single
+   * slot would race across concurrent compactions). `compactRegion` writes it;
+   * `runOptimizedSummarize` verifies it against the region messages before
+   * trusting it, so a stale entry (e.g. a later `/compact` run that bypasses
+   * `compactRegion`) is detected and replaced by surface location.
+   */
+  _pending?: Record<string, { start: number; end: number }>
   _lastDiag?: {
     surfaceNodes: number
     sentMessages: number
     k: number
     m: number
-    regionStart: number
-    regionEnd: number
+    regionStart: number | null
+    regionEnd: number | null
   }
   __ctxcOptimized?: boolean
   config?: unknown
@@ -108,6 +116,8 @@ export interface AgentLike {
 export interface SummarizationInputLike {
   system?: unknown
   tools?: unknown
+  /** The shadowed region's derived messages, in surface order (stock buildSummarizationInput). */
+  messages?: readonly unknown[]
 }
 
 export interface SummaryResultLike {
@@ -275,45 +285,78 @@ export async function runOptimizedSummarize(
   signal?: AbortSignal,
   maxTokensOverride?: number,
 ): Promise<SummaryResultLike> {
-  const pending = engine._pending
   const session = agent.session
   const surface = session && session.surface && Array.isArray(session.surface.nodes) ? session.surface.nodes : null
   const events = session && session.events
-  if (!pending || !surface || !events || !session || typeof session.deriveEventMessage !== 'function') {
+  if (!surface || !events || !session || typeof session.deriveEventMessage !== 'function') {
     throw new Error('optimized summarize: session API unavailable')
   }
-  const posStart = surface.indexOf(pending.start)
-  const posEnd = surface.indexOf(pending.end)
-  if (posStart === -1 || posEnd === -1) throw new Error('optimized summarize: pending range not on surface')
-  const msgs: unknown[] = []
-  let k = -1
-  let m = -1
-  for (let i = 0; i <= posEnd; i++) {
-    // session.surface.nodes holds seq numbers, and session.events is an array
-    // the runtime keeps indexable by seq, so the lookup is a plain index.
-    const ev = events[surface[i]]
-    if (!ev) continue
-    let msg: unknown = null
-    try {
-      msg = session.deriveEventMessage(ev)
-    } catch (e) {
-      msg = null
-    }
-    if (msg === null || msg === undefined) continue
-    msgs.push(msg)
-    if (i >= posStart) {
-      if (k === -1) k = msgs.length
-      m = msgs.length
+  const inputMsgs = Array.isArray(input.messages) ? (input.messages as unknown[]) : null
+
+  // Resolve where the shadowed region sits on the current surface:
+  //   1. the per-session boundary stashed by compactRegion, verified against
+  //      the region messages the engine itself derived (identity match detects
+  //      staleness — e.g. a later `/compact` run bypasses compactRegion);
+  //   2. otherwise locate the region by identity-matching its derived messages
+  //      in the current surface (covers compactNow and any path that never
+  //      stashes a boundary);
+  //   3. otherwise fall back to the stock region-only input (correct, but
+  //      without the KV-cache reuse for that call).
+  let region: { posStart: number; posEnd: number } | null = null
+  const pending = engine._pending && session.id ? engine._pending[session.id] : undefined
+  if (pending && inputMsgs) {
+    const posStart = surface.indexOf(pending.start)
+    const posEnd = surface.indexOf(pending.end)
+    if (posStart !== -1 && posEnd !== -1 && posStart <= posEnd && regionMessagesMatch(session, events, surface, posStart, posEnd, inputMsgs)) {
+      region = { posStart, posEnd }
     }
   }
-  if (k === -1 || m === -1) throw new Error('optimized summarize: no region messages derived')
+  if (!region && inputMsgs && inputMsgs.length > 0) {
+    region = locateRegionMessages(session, events, surface, inputMsgs)
+  }
+
+  let msgs: unknown[]
+  let k: number
+  let m: number
+  let regionStart: number | null
+  let regionEnd: number | null
+  const stockFallback = (): { msgs: unknown[]; k: number; m: number } => {
+    // Stock fallback: only the region messages are sent, and the scoped
+    // instruction compresses all of them (#1..#N).
+    if (!inputMsgs || inputMsgs.length === 0) throw new Error('optimized summarize: no region messages derived')
+    return { msgs: [...inputMsgs], k: 1, m: inputMsgs.length }
+  }
+  if (region) {
+    const built = buildPrefixMessages(session, events, surface, region.posStart, region.posEnd)
+    if (built.k !== -1 && built.m !== -1) {
+      msgs = built.msgs
+      k = built.k
+      m = built.m
+      regionStart = surface[region.posStart] ?? null
+      regionEnd = surface[region.posEnd] ?? null
+    } else {
+      const fb = stockFallback()
+      msgs = fb.msgs
+      k = fb.k
+      m = fb.m
+      regionStart = null
+      regionEnd = null
+    }
+  } else {
+    const fb = stockFallback()
+    msgs = fb.msgs
+    k = fb.k
+    m = fb.m
+    regionStart = null
+    regionEnd = null
+  }
   engine._lastDiag = {
     surfaceNodes: surface.length,
     sentMessages: msgs.length,
     k: k,
     m: m,
-    regionStart: pending.start,
-    regionEnd: pending.end,
+    regionStart: regionStart,
+    regionEnd: regionEnd,
   }
   const instrMsg = {
     id: 'ctxc-instr-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8),
@@ -372,6 +415,119 @@ export async function runOptimizedSummarize(
   }
 }
 
+// Derive the non-null messages of surface positions [posStart..posEnd] and the
+// 1-based message indices (#k..#m) of the region within the full prefix.
+function buildPrefixMessages(session: SessionLike, events: readonly unknown[], surface: readonly number[], posStart: number, posEnd: number): { msgs: unknown[]; k: number; m: number } {
+  const derive = session.deriveEventMessage
+  if (typeof derive !== 'function') throw new Error('optimized summarize: session API unavailable')
+  const msgs: unknown[] = []
+  let k = -1
+  let m = -1
+  for (let i = 0; i <= posEnd; i++) {
+    // session.surface.nodes holds seq numbers, and session.events is an array
+    // the runtime keeps indexable by seq, so the lookup is a plain index.
+    const ev = events[surface[i]]
+    if (!ev) continue
+    let msg: unknown = null
+    try {
+      msg = derive(ev)
+    } catch (e) {
+      msg = null
+    }
+    if (msg === null || msg === undefined) continue
+    msgs.push(msg)
+    if (i >= posStart) {
+      if (k === -1) k = msgs.length
+      m = msgs.length
+    }
+  }
+  return { msgs, k, m }
+}
+
+// Derive the messages of one span without computing indices.
+function deriveRegionMessages(session: SessionLike, events: readonly unknown[], surface: readonly number[], posStart: number, posEnd: number): unknown[] {
+  const derive = session.deriveEventMessage
+  if (typeof derive !== 'function') throw new Error('optimized summarize: session API unavailable')
+  const out: unknown[] = []
+  for (let i = posStart; i <= posEnd; i++) {
+    const ev = events[surface[i]]
+    if (!ev) continue
+    let msg: unknown = null
+    try {
+      msg = derive(ev)
+    } catch (e) {
+      msg = null
+    }
+    if (msg === null || msg === undefined) continue
+    out.push(msg)
+  }
+  return out
+}
+
+// Whether the span's derived messages equal the engine-derived region messages.
+// Identity comparison is safe: deriveEventMessage returns the very object the
+// session event stores, so both sides reference the same instances.
+function regionMessagesMatch(session: SessionLike, events: readonly unknown[], surface: readonly number[], posStart: number, posEnd: number, inputMsgs: unknown[]): boolean {
+  const derived = deriveRegionMessages(session, events, surface, posStart, posEnd)
+  if (derived.length !== inputMsgs.length) return false
+  for (let i = 0; i < derived.length; i++) {
+    if (derived[i] !== inputMsgs[i]) return false
+  }
+  return true
+}
+
+// Locate the span whose derived messages equal inputMsgs by identity. Each
+// message object derives from exactly one surface node, so a match is unique;
+// the scan keeps the last occurrence defensively.
+function locateRegionMessages(session: SessionLike, events: readonly unknown[], surface: readonly number[], inputMsgs: unknown[]): { posStart: number; posEnd: number } | null {
+  const derive = session.deriveEventMessage
+  if (typeof derive !== 'function') throw new Error('optimized summarize: session API unavailable')
+  const n = surface.length
+  const L = inputMsgs.length
+  if (L === 0) return null
+  const derived: (unknown | null)[] = new Array(n)
+  for (let i = 0; i < n; i++) {
+    const ev = events[surface[i]]
+    let msg: unknown = null
+    if (ev) {
+      try {
+        msg = derive(ev)
+      } catch (e) {
+        msg = null
+      }
+    }
+    derived[i] = msg === undefined ? null : msg
+  }
+  let found: { posStart: number; posEnd: number } | null = null
+  for (let i = 0; i < n; i++) {
+    if (derived[i] !== inputMsgs[0]) continue
+    let j = i
+    let p = 0
+    let lastNonNull = i
+    while (p < L) {
+      if (j >= n) break
+      const d = derived[j]
+      if (d === null) {
+        j++
+        continue
+      }
+      if (d !== inputMsgs[p]) break
+      lastNonNull = j
+      j++
+      p++
+    }
+    if (p === L) found = { posStart: i, posEnd: lastNonNull }
+  }
+  return found
+}
+
+/** Extract a session id from an agent-shaped value, or null when absent. */
+export function sessionIdOf(agent: unknown): string | null {
+  const a = agent as { session?: { id?: unknown } } | undefined
+  const id = a && a.session ? a.session.id : undefined
+  return typeof id === 'string' && id.length > 0 ? id : null
+}
+
 // Upgrade one engine instance in place (idempotent per instance). Used by the
 // tools plugin on first use so every compaction of that session — including
 // the automatic pressure/overflow path and the `compact` command — runs the
@@ -381,7 +537,11 @@ export function patchEngine(engine: OptimizedEngineLike, opts: { maxTokens?: num
   if (engine.__ctxcOptimized) return true
   const origCompact = engine.compactRegion.bind(engine)
   engine.compactRegion = async function (this: OptimizedEngineLike, start: number, end: number, agent: unknown, signal?: AbortSignal) {
-    this._pending = { start, end }
+    const sid = sessionIdOf(agent)
+    if (sid) {
+      const pending = (this._pending ??= {})
+      pending[sid] = { start, end }
+    }
     return origCompact(start, end, agent, signal)
   }
   engine.summarize = function (this: OptimizedEngineLike, input: unknown, agent: unknown, signal?: AbortSignal) {

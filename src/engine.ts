@@ -28,19 +28,26 @@ import { runOptimizedSummarize } from './optimizer.js'
 import type { OptimizedEngineLike, SummarizationInputLike } from './optimizer.js'
 
 export default class OptimizedCompactionEngine extends BasicCompactionEngine {
-  _pending?: { start: number; end: number }
+  // Keyed by session id: the engine is a host-level singleton shared by every
+  // session, so a single `{start, end}` slot would race across concurrent
+  // compactions (see optimizer.ts for the staleness verification + fallback).
+  _pending?: Record<string, { start: number; end: number }>
 
   _lastDiag?: {
     surfaceNodes: number
     sentMessages: number
     k: number
     m: number
-    regionStart: number
-    regionEnd: number
+    regionStart: number | null
+    regionEnd: number | null
   }
 
   async compactRegion(start: number, end: number, agent: Agent, signal?: AbortSignal) {
-    this._pending = { start, end }
+    const sid = agent && agent.session ? agent.session.id : undefined
+    if (sid) {
+      const pending = (this._pending ??= {})
+      pending[sid] = { start, end }
+    }
     return super.compactRegion(start, end, agent, signal)
   }
 
