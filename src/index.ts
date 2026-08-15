@@ -15,17 +15,17 @@ export const name = 'tool-context-compression'
 
 export const inject = ['tools']
 
-export const Config = Schema.object({
-  autoArchive: Schema.boolean().default(true).description('context_compact saves the full raw span to a spill artifact before replacing it.'),
-  maxTokens: Schema.number().default(16384).description('Output budget for the summarization call. Floored at 16384 because deepseek-v4-flash thinking mode otherwise truncates the checkpoint at the stock 8192 cap.'),
-})
-
-interface PluginConfig {
+export interface Config {
   autoArchive: boolean
   maxTokens: number
 }
 
-export function apply(ctx: Context, config: PluginConfig) {
+export const Config: Schema<Config> = Schema.object({
+  autoArchive: Schema.boolean().default(true).description('context_compact saves the full raw span to a spill artifact before replacing it.'),
+  maxTokens: Schema.number().default(16384).description('Output budget for the summarization call. Floored at 16384 because deepseek-v4-flash thinking mode otherwise truncates the checkpoint at the stock 8192 cap.'),
+})
+
+export function apply(ctx: Context, config: Config) {
   // NOTE: sessionQuery is deliberately NOT captured here. It is resolved per
   // call through resolveService() (like spillStore/compaction): the
   // session-query-sqlite row mounts only after its own `sessions` dependency
