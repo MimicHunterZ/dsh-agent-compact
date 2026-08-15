@@ -2,8 +2,9 @@
 //
 // Official plugin shape: named `name` / `Config` / `apply(ctx, config)`
 // exports (see docs/user/develop/basic/config.md in deepseek-harness).
-// Registers three model-visible tools and lazily upgrades the per-session
-// compaction engine on first use (see ./optimizer.js).
+// Registers one model-visible tool (context_compact) and lazily patches the
+// per-session compaction engine on first use so its summarize() honors
+// agent-written checkpoints (see ./optimizer.js).
 
 import { createHash } from 'node:crypto'
 import { readdir } from 'node:fs/promises'
@@ -33,7 +34,7 @@ export function apply(ctx: Context, config: Config) {
   // call through resolveService() (like spillStore/compaction): the
   // session-query-sqlite row mounts only after its own `sessions` dependency
   // chain is up, so capturing `ctx.get('sessionQuery')` at apply time raced
-  // the boot order and intermittently left the three context_* tools broken
+  // the boot order and intermittently left the context_compact tool broken
   // ('sessionQuery service is not available in this runtime') on processes
   // where this plugin's apply won the race.
   const agentPresets = ctx.get('agentPresets')
@@ -204,7 +205,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // ---- anchor-based boundary resolution ----
-  // The model can skip context_surface entirely: it passes verbatim text of
+  // The model does not need a surface listing: it passes verbatim text of
   // the first node (startAnchor) and/or last node (endAnchor) of the span, and
   // the tool locates the seqs by normalized text match on the CURRENT surface.
   // Anchors resolve afresh on every call, so repeated compactions never go

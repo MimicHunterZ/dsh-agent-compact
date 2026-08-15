@@ -1,20 +1,26 @@
 # @mimichunterz/agent-compact
 
-Context compression for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): three agent tools plus an optimized compaction engine.
+English · [简体中文](README.zh-CN.md)
 
-- **`context_surface`** — read-only view of the conversation surface (every node the model sees, with its `seq` coordinate). Zero LLM cost.
-- **`context_archive`** — backup the full raw text of a span to a session-scoped spill artifact without compressing.
-- **`context_compact`** — one step: auto-archive the raw span, then replace it with a single summary checkpoint node.
+Context compression for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): lets the **agent autonomously call** `context_compact` to compress a span of the conversation it chooses — the finished, no-longer-needed middle — and replace it with a checkpoint the agent writes itself.
 
-The compaction engine is upgraded to feed the summarizer the **full context up to the region end** (a genuine prefix of the last routed request) plus a **scoped instruction that compresses only messages #k..#m**. Measured effect (deepseek-v4-flash, real usage accounting):
+## Why
 
-| | stock engine | this plugin |
-|---|---|---|
-| input cache-hit | 88.4% | **99.0%** |
-| input miss | grows with region size | constant ≈ instruction (~470 tokens) |
-| input cost | ¥0.0073 / compaction | **¥0.0014** (~80% cheaper) |
+Compaction is normally a full-context sweep: the official engine only ever compresses from the start of the conversation, so the opening's task plan and direction are **partially lost along with the compressed information**. `context_compact` compresses **only the span the agent selects** — a finished step, a debugged log exchange, an off-track discussion — while the important opening and the recent context stay intact. Span compaction keeps **information loss from compaction as small as possible**: the agent decides what is truly dead, and only that gets condensed.
 
-Full A/B methodology and raw data: [`docs/verification.md`](docs/verification.md) and [`docs/ab-data.json`](docs/ab-data.json).
+Typical moments to use it:
+
+- a task step is done — compress it, keep the remaining steps and the active instruction live;
+- a bug hunt or a wrong research direction is over — compress that exchange into a short "what went wrong / root cause / fix" note;
+- the opening requirements are stale — compress the start and restate the current intent.
+
+## What it does
+
+- The agent picks the span via `startAnchor` / `endAnchor` (unique-prefix matching, CJK punctuation-width tolerant) and passes a **required** `summary` — the Markdown checkpoint it wrote itself.
+- The raw span is archived to the spill store first (`~/.dsh/spill/session-<hash>/<hex>-<seq>.txt`, sequential naming, restart-safe); the path is echoed in the shadow message so the model can read the raw text back.
+- The host engine runs the stock transaction — boundary validation, tool-pair balance, surface replacement — with **no separate LLM summarizer request**.
+
+The tool call itself happens inside the agent's normal turn and is billed like any other turn; what is avoided is only the *extra* summarizer request the official engine would make for the same span.
 
 ## Install
 
@@ -26,41 +32,31 @@ dsh plugin --profile web add @mimichunterz/agent-compact
 dsh plugin --profile web add ./agent-compact
 ```
 
-`dsh plugin` forwards to pnpm in the profile directory and appends the bundle to `dsh.profile.bundles` (see the official [publish guide](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.md)). Restart the profile. All sessions then see the three `context_*` tools.
+`dsh plugin` forwards to pnpm in the profile directory and appends the bundle to `dsh.profile.bundles` (see the official [publish guide](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.md)). **Restart the profile** — every session then sees the `context_compact` tool.
 
-### Optional: optimize the engine at mount time for a preset
-
-Out of the box the engine is upgraded lazily on the first `context_compact` call of a session (which also covers the automatic pressure/overflow path and the `compact` command from then on). To optimize from mount time — before any tool use — replace `compaction-basic` inside a preset copy's `compaction` isolate realm:
-
-```yaml
-- id: compaction-basic
-  name: '@mimichunterz/agent-compact/engine'
-```
-
-(`OptimizedCompactionEngine extends BasicCompactionEngine`; the durable transaction, thresholds, and retention stay stock. Requires the package installed in the profile, from which preset rows resolve.)
-
-## Publish
-
-```sh
-npm publish   # requires an npm account; the package name must be unique
-```
+The bundle's own `cordis.patch.yml` pins the spill archive root to `~/.dsh/spill` (deployments can override it again through the profile's `cordis.patch.yml`).
 
 ## Configuration
 
 | field | default | meaning |
 |---|---|---|
-| `autoArchive` | `true` | `context_compact` saves the raw span to a spill artifact before replacing it |
-| `maxTokens` | `16384` | summarization output budget; floored at 16384 because thinking-mode models truncate at the stock 8192 cap |
+| `autoArchive` | `true` | `context_compact` saves the full raw span to a spill artifact before replacing it |
 
 Pass through the inserted row in the profile's `cordis.patch.yml` or a bundle patch.
 
-## Compatibility & known constraints
+## How it works
+
+- **Agent-written checkpoint**: `summary` is mandatory, so the tool path always uses the checkpoint the agent wrote. `patchEngine()` (see `src/optimizer.ts`) wraps the engine's `summarize()`: when an `_externalSummary` is present (one-shot, keyed per session id), it returns that text directly; only when none is present does it forward to the stock implementation — a branch that serves the automatic compaction path and keeps official behavior intact.
+- **Anchor matching** (`src/normalize.ts`): `normText` collapses whitespace and maps CJK full-width punctuation to half-width (，→, etc.), applied to both anchors and node text. Matching keeps **unique-prefix** semantics: zero hits → "not found" with closest-node hints; more than one hit → "AMBIGUOUS".
+- **Restart-safe sequential archives**: the next number is derived by scanning the session's spill directory (`max+1`) — gap-free; the backend's random hex prefix makes filename collisions impossible.
+- **Paired cleanup**: the tool-call message (carrying the full `summary` argument) and its tool/result are each replaced by one tiny shadow message, so the checkpoint text never appears twice on the surface (skipped when the message holds more than one tool call).
+
+## Compatibility
 
 - Built and verified against DeepSeek Harness `0.1.0-rc.6` (`@deepseek-ai/dsh-compaction-basic@0.1.0-rc.6`).
-- `deepseek-v4-flash` runs thinking mode by default; `reasoningTokens` consume the output budget stochastically (observed 0–8K). The summarizer raises `maxTokens` to compensate.
-- **Same-turn caveat**: consecutive compactions within one model turn replace spans with checkpoints, so the surface diverges from the last routed request and later compactions in that turn temporarily lose cache reuse; the next request re-anchors and it recovers. Compress once per turn for best results.
-- **Do not** insert `<compaction-region-start/end>` markers into the message stream: any in-stream token breaks prefix matching and costs *more* than stock. Boundary info must live in the trailing instruction as message indices.
+- Only **one compaction per session at a time** (the engine transaction is serialized); anchors re-resolve on every call, so later compactions never go stale after earlier checkpoints replaced old nodes.
+- With a local spill backend the root is fixed; other backends degrade gracefully (no `root` field → in-memory counter), and compaction itself is unaffected.
 
 ## License
 
-MIT. The optimizer derives from `@deepseek-ai/dsh-compaction-basic` and related DeepSeek Harness packages (MIT, Copyright DeepSeek) — see [`LICENSE`](LICENSE).
+MIT. The patch derives from `@deepseek-ai/dsh-compaction-basic` and related DeepSeek Harness packages (MIT, Copyright DeepSeek) — see [`LICENSE`](LICENSE).

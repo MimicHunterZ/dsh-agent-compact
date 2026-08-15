@@ -1,6 +1,6 @@
 {
   "name": "@mimichunterz/agent-compact",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Context compression tool (context_compact): the agent writes the replacement checkpoint itself and hands it to the host compaction engine, which skips the LLM summarizer call; automatic compaction stays on the official engine.",
   "type": "module",
   "main": "./lib/index.js",
@@ -21,6 +21,7 @@
     "src",
     "cordis.patch.yml",
     "README.md",
+    "README.zh-CN.md",
     "LICENSE",
     "docs",
     "tsconfig.json"
