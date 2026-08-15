@@ -26,7 +26,13 @@ interface PluginConfig {
 }
 
 export function apply(ctx: Context, config: PluginConfig) {
-  const sessionQuery = ctx.get('sessionQuery')
+  // NOTE: sessionQuery is deliberately NOT captured here. It is resolved per
+  // call through resolveService() (like spillStore/compaction): the
+  // session-query-sqlite row mounts only after its own `sessions` dependency
+  // chain is up, so capturing `ctx.get('sessionQuery')` at apply time raced
+  // the boot order and intermittently left the three context_* tools broken
+  // ('sessionQuery service is not available in this runtime') on processes
+  // where this plugin's apply won the race.
   const agentPresets = ctx.get('agentPresets')
   const tools = ctx.get('tools')
   if (!tools) throw new Error('@mimichunterz/agent-compact: tools service unavailable')
@@ -44,6 +50,10 @@ export function apply(ctx: Context, config: PluginConfig) {
 
   interface SpillStoreLike {
     saveText(args: SpillSaveArgs): Promise<{ locator: JsonValue; bytes: JsonValue; retrievalHint: JsonValue }>
+  }
+
+  interface SessionQueryLike {
+    readSurface(sessionId: string): Promise<{ events?: unknown } | null>
   }
 
   // Type alias (not interface) so it carries an implicit index signature and
@@ -156,9 +166,10 @@ export function apply(ctx: Context, config: PluginConfig) {
     return t.length <= max ? t : t.slice(0, max) + '…'
   }
 
-  async function readSurfaceNodes(sessionId: string): Promise<SurfaceNode[] | null> {
+  async function readSurfaceNodes(agent: AgentWithSession): Promise<SurfaceNode[] | null> {
+    const sessionQuery = resolveService(agent, 'sessionQuery') as SessionQueryLike | undefined
     if (!sessionQuery) return null
-    const snap = await sessionQuery.readSurface(sessionId)
+    const snap = await sessionQuery.readSurface(agent.session.id)
     return snap && Array.isArray(snap.events) ? (snap.events as SurfaceNode[]) : []
   }
 
@@ -245,7 +256,7 @@ export function apply(ctx: Context, config: PluginConfig) {
     async execute(args, exec) {
       const agent = agentOf(exec)
       if (!agent) throw new Error('no agent session available for this call')
-      const nodes = await readSurfaceNodes(agent.session.id)
+      const nodes = await readSurfaceNodes(agent)
       if (nodes === null) throw new Error('sessionQuery service is not available in this runtime')
       const offset = Math.max(0, Number(args.offset) || 0)
       const limit = Math.max(1, Number(args.limit) || 200)
@@ -284,7 +295,7 @@ export function apply(ctx: Context, config: PluginConfig) {
       if (!agent) throw new Error('no agent session available for this call')
       const spillStore = resolveService(agent, 'spillStore') as SpillStoreLike | undefined
       if (!spillStore) throw new Error('spillStore service is not available in this runtime (tried host plane and preset realm)')
-      const nodes = await readSurfaceNodes(agent.session.id)
+      const nodes = await readSurfaceNodes(agent)
       if (nodes === null) throw new Error('sessionQuery service is not available in this runtime')
       const startSeq = Number(args.start)
       const endSeq = Number(args.end)
@@ -331,7 +342,7 @@ export function apply(ctx: Context, config: PluginConfig) {
       if (!Number.isInteger(startSeq) || !Number.isInteger(endSeq)) {
         throw new Error('invalid boundary seqs: got start=' + args.start + ' end=' + args.end)
       }
-      const nodes = await readSurfaceNodes(agent.session.id)
+      const nodes = await readSurfaceNodes(agent)
       if (nodes === null) throw new Error('sessionQuery service is not available in this runtime')
       const b = findBoundaries(nodes, startSeq, endSeq)
       if ('error' in b) throw new Error(b.error)
