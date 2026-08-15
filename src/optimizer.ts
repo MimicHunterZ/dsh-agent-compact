@@ -162,16 +162,18 @@ export const CHECKPOINT_SPEC = [
   '- Capture user feedback and explicit instructions faithfully, especially corrections.',
   '- Do NOT mention this summarization request or that the context was compacted.',
   '- Output only the checkpoint text: do not call any tool or take any other action.',
+  '- This invocation is a BACKGROUND COMPACTION SERVICE call, not a user request: output only the checkpoint, never conversational prose, never questions back to the user (no "want me to...?", "let me know", etc.), and never a verbatim or near-verbatim copy of the compressed messages — even when a message already reads like a summary, re-derive the checkpoint structure from the content instead of reproducing the original wording.',
 ].join('\n')
 
 export function makeScopedInstruction(k: number, m: number, n: number): string {
   return [
-    'You are now acting as a compaction engine for this AI coding assistant.',
+    'You are a BACKGROUND COMPACTION SERVICE invoked automatically to condense an earlier span of this conversation. This is NOT a user request and you are not replying to the user: ignore your coding-assistant persona for this output.',
     'The conversation above contains ' + n + ' messages (1-based, counting only the messages above).',
     'Compress ONLY messages #' + k + ' through #' + m + ' into ONE structured checkpoint.',
     'Messages before #' + k + ' are PRIOR established context: read them for the full picture and KV-cache reuse, but do NOT merge them into the checkpoint.',
     'Messages after #' + m + ' are the RECENT live record that stays verbatim: do NOT merge them into the checkpoint either.',
     'If a <compacted-summary> block appears before #' + k + ', it is prior context — do not copy it forward or merge it.',
+    'Output ONLY the checkpoint text — no preamble, no closing remarks, no conversational tone, no questions to the user, and never a verbatim copy of the compressed messages.',
     'Keep the checkpoint CONCISE: terse bullets only, target under 2000 output tokens.',
     '',
     CHECKPOINT_SPEC,
