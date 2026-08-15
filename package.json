@@ -1,7 +1,7 @@
 {
   "name": "@mimichunterz/agent-compact",
   "version": "0.1.0",
-  "description": "Context compression tools (context_surface / context_archive / context_compact) plus an optimized compaction engine for DeepSeek Harness: full-context summarization input + scoped #k..#m instruction, ~80% cheaper input via KV-cache reuse.",
+  "description": "Context compression tool (context_compact): the agent writes the replacement checkpoint itself and hands it to the host compaction engine, which skips the LLM summarizer call; automatic compaction stays on the official engine.",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
@@ -9,10 +9,6 @@
     ".": {
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
-    },
-    "./engine": {
-      "types": "./lib/engine.d.ts",
-      "default": "./lib/engine.js"
     },
     "./optimizer": {
       "types": "./lib/optimizer.d.ts",

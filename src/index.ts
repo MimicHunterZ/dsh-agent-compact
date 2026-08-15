@@ -17,12 +17,10 @@ export const inject = ['tools']
 
 export interface Config {
   autoArchive: boolean
-  maxTokens: number
 }
 
 export const Config: Schema<Config> = Schema.object({
   autoArchive: Schema.boolean().default(true).description('context_compact saves the full raw span to a spill artifact before replacing it.'),
-  maxTokens: Schema.number().default(16384).description('Output budget for the summarization call. Floored at 16384 because deepseek-v4-flash thinking mode otherwise truncates the checkpoint at the stock 8192 cap.'),
 })
 
 export function apply(ctx: Context, config: Config) {
@@ -75,7 +73,6 @@ export function apply(ctx: Context, config: Config) {
 
   interface CompactionLike {
     compactRegion(start: number, end: number, agent: AgentWithSession, signal?: AbortSignal): Promise<CompactionResultLike>
-    _lastDiag?: unknown
   }
 
   interface SurfaceNodeData {
@@ -377,11 +374,11 @@ export function apply(ctx: Context, config: Config) {
 
   disposers.push(tools.register(defineTool({
     name: 'context_compact',
-    description: 'Replace a span of past conversation with a checkpoint that YOU write — no LLM summarizer call is made. The tool locates the span by anchors, archives the raw span to a spill artifact, replaces the span with your summary, and records the compaction.',
+    description: 'Compress a span of past conversation into a single Markdown checkpoint that YOU write. The raw span is archived to a spill artifact, replaced by your checkpoint, and the compaction is recorded. Locate the span by anchors: endAnchor (REQUIRED — verbatim opening of the LAST message of the span; that node itself is replaced, so pass its predecessor\'s opening to keep it) and startAnchor (verbatim opening of the FIRST message; REQUIRED to compress a MIDDLE span — omitting it starts at the very first node, which discards the opening requirements and direction unless you intend a rebaseline). When to compact: Progress (most common) — the opening defined the task order and you executed in sequence; compact each finished step at its topic boundary, keeping the active instruction and remaining steps live. Course correction — the conversation drifted and accumulated noise; compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying the junk forward. Rebaseline — the opening requirements are stale (the user\'s needs evolved); the start itself may be compacted, and the checkpoint then restates the CURRENT intent and what survives, superseding the old opening. Checkpoint conventions (adapt to the scene): Markdown, terse bullets, ## sections; preserve exact paths/commands/ids and the user\'s requirements and direction. Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step. Correction: what went wrong, root cause, the fix, what to keep doing next. Rebaseline: current intent, surviving decisions, plan ahead. Constraints: each anchor must be a unique prefix of exactly one message (whitespace-insensitive, [tool-*] markers ignored); edges snap to balanced tool-call/result boundaries; the engine rejects a checkpoint not smaller than the compressed span; one compaction per session at a time.',
     parameters: {
-      startAnchor: { type: 'string', description: 'Verbatim OPENING of the FIRST node of the span; must be a unique prefix of exactly one user/assistant message (whitespace-insensitive, [tool-*] markers ignored). REQUIRED to compress a MIDDLE span. WARNING: omitting it starts the span at the very FIRST node of the conversation, discarding the opening requirements and direction — only omit it when you deliberately want to compress ALL history up to endAnchor.' },
+      startAnchor: { type: 'string', description: 'Verbatim OPENING of the FIRST node of the span; must be a unique prefix of exactly one user/assistant message (whitespace-insensitive, [tool-*] markers ignored). REQUIRED to compress a MIDDLE span. WARNING: omitting it starts the span at the very FIRST node of the conversation, discarding the opening requirements and direction — only omit it when you deliberately want to compress ALL history up to endAnchor, or when the opening requirements are stale and you intend a rebaseline.' },
       endAnchor: { type: 'string', description: 'REQUIRED. Verbatim OPENING of the LAST node of the span (unique prefix of exactly one message). That node itself is replaced — pass its predecessor\'s opening to keep it.' },
-      summary: { type: 'string', description: 'REQUIRED. The full Markdown checkpoint that replaces the span, written by YOU from the conversation content: structured ## sections (Primary Request and Intent, Key Technical Concepts, Files and Code, Errors and Fixes, Current Work, Next Step, Critical Context), terse bullets, preserve exact paths/commands/identifiers, keep the user\'s original requirements and direction. NOT a verbatim copy of the span; the engine rejects a summary not smaller than the compressed content.' },
+      summary: { type: 'string', description: 'REQUIRED. The full Markdown checkpoint that replaces the span, written by YOU from the conversation content. Adapt the structure to the scene: Progress → ## sections Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction → what went wrong, root cause, the fix, what to keep doing next; Rebaseline → current intent, surviving decisions, plan ahead. Always: terse bullets; preserve exact paths/commands/identifiers and the user\'s requirements and direction; never a verbatim copy of the span (the engine rejects a summary not smaller than the compressed content).' },
       note: { type: 'string', description: 'Optional. What this checkpoint must preserve for later steps (extra emphasis, not a replacement for anchors).' },
       name: { type: 'string', description: 'Optional. Archive file base name for the raw copy (backend sanitizes it). Default: context-compacted-<start>-<end>.txt.' },
     },
@@ -397,7 +394,7 @@ export function apply(ctx: Context, config: Config) {
       }
       const engine = resolveService(agent, 'compaction') as CompactionLike | undefined
       if (!engine) throw new Error('compaction service is not available in this runtime (tried host plane and preset realm)')
-      patchEngine(engine as unknown as OptimizedEngineLike, { maxTokens: config.maxTokens })
+      patchEngine(engine as unknown as OptimizedEngineLike)
       const nodes = await readSurfaceNodes(agent)
       if (nodes === null) throw new Error('sessionQuery service is not available in this runtime')
       const b = resolveBoundaries(nodes, args)
@@ -435,16 +432,13 @@ export function apply(ctx: Context, config: Config) {
       // Debug/introspection metrics go to the log, never into the model-visible
       // tool result (DSH tool convention: the execute return IS what the model
       // sees, so it must stay minimal — see bash/read/goal tools).
-      ctx.logger.info('[context_compact] %s span %d..%d (%s), shadowed %d nodes / %s tokens, surface %d -> after, usage=%o, diag=%o', agent.session.id, startSeq, endSeq, b.method, Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs.length : 0, String(result.shadowedTokenCount ?? '?'), nodes.length, usage, engine._lastDiag)
-      const summary = blocksText(Array.isArray(result.summary) ? result.summary : null, 0).replace(/\n+$/, '')
+      ctx.logger.info('[context_compact] %s span %d..%d (%s), shadowed %d nodes / %s tokens, surface %d -> after, usage=%o', agent.session.id, startSeq, endSeq, b.method, Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs.length : 0, String(result.shadowedTokenCount ?? '?'), nodes.length, usage)
       const out: {
         ok: boolean
-        summary: string
         archived: { locator: JsonValue; retrievalHint: JsonValue } | null
         archiveError?: string
       } = {
         ok: true,
-        summary: summary,
         archived: archived ? {
           locator: archived.locator,
           retrievalHint: archived.retrievalHint,

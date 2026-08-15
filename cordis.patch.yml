@@ -7,12 +7,10 @@
 # Optional: pass configuration through this row:
 #   config:
 #     autoArchive: true
-#     maxTokens: 16384
 #
-# For mount-time engine optimization of a specific preset (so automatic
-# pressure/overflow compaction is optimized even before the first tool use),
-# replace `compaction-basic` inside that preset's `compaction` isolate realm
-# with:  name: '@mimichunterz/agent-compact/engine'
+# The tool hands the agent-written checkpoint to the host compaction engine
+# (one-shot, injected per session); automatic pressure/overflow compaction and
+# /compact keep the official engine behavior untouched.
 - insert:
     - id: tool-context-compression
       name: '@mimichunterz/agent-compact'
