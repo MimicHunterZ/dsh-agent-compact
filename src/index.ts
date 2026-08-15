@@ -377,12 +377,13 @@ export function apply(ctx: Context, config: Config) {
 
   disposers.push(tools.register(defineTool({
     name: 'context_compact',
-    description: 'Agent-controlled context compression, one step: FIRST saves the full raw text of the surface span to a session-scoped spill artifact (auto-archive), THEN replaces the span with ONE summary checkpoint node. Locate the span with ANCHOR TEXT — no context_surface call needed. endAnchor is REQUIRED: copy the verbatim OPENING of the LAST node of the span (e.g. the first sentence of your own message after a tool result); the tool requires it to be a UNIQUE PREFIX of exactly one surface node (whitespace-insensitive, [tool-*] markers ignored) and compresses [firstNode..thatNode] inclusively — the endAnchor node itself IS compressed, so pass its predecessor to keep it. startAnchor (optional, unique prefix of the FIRST node of the span) starts mid-conversation; otherwise the span starts at the very first node. A non-unique anchor is REJECTED: not-found lists the closest nodes, ambiguous lists every candidate so you lengthen the anchor. Matched edges are snapped to balanced tool-call/result boundaries. The compaction engine is upgraded by this plugin: the summarization input is the FULL context up to the region end (maximizing KV-cache reuse via a genuine prefix of the last routed request) plus a scoped instruction that compresses only messages #k..#m. Constraints: both edges must be balanced (never split an assistant tool-call/result pair, end boundary must be closed), and only one compaction may run per session at a time. Keep the still-active user instruction out of the range. The raw span is archived: read it back later via the returned locator/retrievalHint.',
+    description: 'Replace a span of past conversation with a checkpoint that YOU write — no LLM summarizer call is made. The tool locates the span by anchors, archives the raw span to a spill artifact, replaces the span with your summary, and records the compaction.',
     parameters: {
-      startAnchor: { type: 'string', description: 'Optional. Verbatim OPENING of the FIRST node of the span; must be a unique prefix of exactly one surface node. Defaults to the very first node.' },
-      endAnchor: { type: 'string', description: 'REQUIRED. Verbatim OPENING of the LAST node of the span (that node itself is compressed; pass its predecessor to keep it). Must be a unique prefix of exactly one surface node.' },
-      note: { type: 'string', description: 'Optional short note: why this range is finished and what the summary must preserve for later steps. Echoed in the result only.' },
-      name: { type: 'string', description: 'Optional suggested archive file name for the auto-archived raw copy (backend sanitizes it). Default: context-compacted-<start>-<end>.txt.' },
+      startAnchor: { type: 'string', description: 'Verbatim OPENING of the FIRST node of the span; must be a unique prefix of exactly one user/assistant message (whitespace-insensitive, [tool-*] markers ignored). REQUIRED to compress a MIDDLE span. WARNING: omitting it starts the span at the very FIRST node of the conversation, discarding the opening requirements and direction — only omit it when you deliberately want to compress ALL history up to endAnchor.' },
+      endAnchor: { type: 'string', description: 'REQUIRED. Verbatim OPENING of the LAST node of the span (unique prefix of exactly one message). That node itself is replaced — pass its predecessor\'s opening to keep it.' },
+      summary: { type: 'string', description: 'REQUIRED. The full Markdown checkpoint that replaces the span, written by YOU from the conversation content: structured ## sections (Primary Request and Intent, Key Technical Concepts, Files and Code, Errors and Fixes, Current Work, Next Step, Critical Context), terse bullets, preserve exact paths/commands/identifiers, keep the user\'s original requirements and direction. NOT a verbatim copy of the span; the engine rejects a summary not smaller than the compressed content.' },
+      note: { type: 'string', description: 'Optional. What this checkpoint must preserve for later steps (extra emphasis, not a replacement for anchors).' },
+      name: { type: 'string', description: 'Optional. Archive file base name for the raw copy (backend sanitizes it). Default: context-compacted-<start>-<end>.txt.' },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
@@ -391,6 +392,9 @@ export function apply(ctx: Context, config: Config) {
     async execute(args, exec) {
       const agent = agentOf(exec)
       if (!agent) throw new Error('no agent session available for this call')
+      if (typeof args.summary !== 'string' || !args.summary.trim()) {
+        throw new Error('summary is REQUIRED: write the Markdown checkpoint yourself (this tool makes no LLM summarizer call)')
+      }
       const engine = resolveService(agent, 'compaction') as CompactionLike | undefined
       if (!engine) throw new Error('compaction service is not available in this runtime (tried host plane and preset realm)')
       patchEngine(engine as unknown as OptimizedEngineLike, { maxTokens: config.maxTokens })
@@ -399,6 +403,12 @@ export function apply(ctx: Context, config: Config) {
       const b = resolveBoundaries(nodes, args)
       const startSeq = b.startSeq
       const endSeq = b.endSeq
+      // Hand the agent-written checkpoint to the engine; the patched summarizer
+      // consumes it (one-shot) and skips the LLM call entirely.
+      {
+        const ext = ((engine as unknown as { _externalSummary?: Record<string, string> })._externalSummary ??= {})
+        ext[agent.session.id] = args.summary
+      }
 
       const spillStore = resolveService(agent, 'spillStore') as SpillStoreLike | undefined
       const defaultName = 'context-compacted-' + startSeq + '-' + endSeq + '.txt'

@@ -76,6 +76,13 @@ export interface OptimizedEngineLike {
    * `compactRegion`) is detected and replaced by surface location.
    */
   _pending?: Record<string, { start: number; end: number }>
+  /**
+   * Agent-provided checkpoint text, keyed per session id (one-shot: consumed
+   * by the next summarize for that session). When present, the summarizer
+   * skips the LLM call entirely and returns this text as the summary — the
+   * executing agent writes the replacement checkpoint itself.
+   */
+  _externalSummary?: Record<string, string>
   _lastDiag?: {
     surfaceNodes: number
     sentMessages: number
@@ -84,7 +91,7 @@ export interface OptimizedEngineLike {
     regionStart: number | null
     regionEnd: number | null
   }
-  __ctxcOptimized?: boolean
+  __ctxcOptimized?: number
   config?: unknown
   ctx?: unknown
   compactRegion?: (start: number, end: number, agent: unknown, signal?: AbortSignal) => Promise<unknown>
@@ -288,6 +295,23 @@ export async function runOptimizedSummarize(
   maxTokensOverride?: number,
 ): Promise<SummaryResultLike> {
   const session = agent.session
+  // Agent-provided checkpoint: skip the LLM call entirely. The engine's
+  // summarizeCompaction still frames it (checkpoint preamble/tags) and still
+  // rejects a summary not smaller than the shadowed content.
+  const ext = engine._externalSummary
+  const sid = session && session.id ? session.id : undefined
+  if (sid && ext && typeof ext[sid] === 'string') {
+    const text = ext[sid]
+    delete ext[sid]
+    return {
+      summary: [{ type: 'text', text }],
+      rawOutput: [],
+      llmStreamCall: false,
+      provider: 'agent',
+      model: 'agent',
+      maxTokens: 0,
+    }
+  }
   const surface = session && session.surface && Array.isArray(session.surface.nodes) ? session.surface.nodes : null
   const events = session && session.events
   if (!surface || !events || !session || typeof session.deriveEventMessage !== 'function') {
@@ -534,21 +558,32 @@ export function sessionIdOf(agent: unknown): string | null {
 // tools plugin on first use so every compaction of that session — including
 // the automatic pressure/overflow path and the `compact` command — runs the
 // optimized summarizer.
+// Bump when the optimizer's behavior changes: the compaction engine is a
+// host-level singleton that survives plugin HMR, and the previous guard
+// (`if (engine.__ctxcOptimized) return true`) captured the summarize closure
+// ONCE — later optimizer edits (e.g. the external-summary injection) never
+// took effect until a process restart. The versioned guard re-binds
+// `engine.summarize` on every patch so code edits hot-apply; `compactRegion`
+// is wrapped only on the first patch to avoid nesting.
+export const PATCH_VERSION = 2
+
 export function patchEngine(engine: OptimizedEngineLike, opts: { maxTokens?: number } = {}): boolean {
   if (!engine || typeof engine.compactRegion !== 'function' || typeof engine.summarize !== 'function') return false
-  if (engine.__ctxcOptimized) return true
-  const origCompact = engine.compactRegion.bind(engine)
-  engine.compactRegion = async function (this: OptimizedEngineLike, start: number, end: number, agent: unknown, signal?: AbortSignal) {
-    const sid = sessionIdOf(agent)
-    if (sid) {
-      const pending = (this._pending ??= {})
-      pending[sid] = { start, end }
+  if (engine.__ctxcOptimized === PATCH_VERSION) return true
+  if (!engine.__ctxcOptimized) {
+    const origCompact = engine.compactRegion.bind(engine)
+    engine.compactRegion = async function (this: OptimizedEngineLike, start: number, end: number, agent: unknown, signal?: AbortSignal) {
+      const sid = sessionIdOf(agent)
+      if (sid) {
+        const pending = (this._pending ??= {})
+        pending[sid] = { start, end }
+      }
+      return origCompact(start, end, agent, signal)
     }
-    return origCompact(start, end, agent, signal)
   }
   engine.summarize = function (this: OptimizedEngineLike, input: unknown, agent: unknown, signal?: AbortSignal) {
     return runOptimizedSummarize(this, input as SummarizationInputLike, agent as AgentLike, signal, opts.maxTokens)
   }
-  engine.__ctxcOptimized = true
+  engine.__ctxcOptimized = PATCH_VERSION
   return true
 }
