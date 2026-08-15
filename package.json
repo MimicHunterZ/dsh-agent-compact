@@ -51,6 +51,7 @@
     "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
+    "@types/node": "^26.2.0",
     "typescript": "^6.0.3"
   },
   "keywords": [

@@ -14,3 +14,12 @@
 - insert:
     - id: tool-context-compression
       name: '@mimichunterz/agent-compact'
+
+# Durable spill root for this plugin's raw-span archives: files land at
+# $DSH_HOME/spill/session-<hash>/<hex>-<NNN>.txt (the local spill backend
+# scopes per session). The shipped spill default is a per-process mkdtemp under
+# TMPDIR — ephemeral and outside the workspace. Bundle layers apply before the
+# profile's own cordis.patch.yml, so a deployment may still override this row.
+- id: spill-local
+  config:
+    root: !!js dshHomePath('spill')

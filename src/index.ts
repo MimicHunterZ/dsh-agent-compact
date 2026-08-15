@@ -5,6 +5,9 @@
 // Registers three model-visible tools and lazily upgrades the per-session
 // compaction engine on first use (see ./optimizer.js).
 
+import { createHash } from 'node:crypto'
+import { readdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import Schema from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
@@ -146,32 +149,39 @@ export function apply(ctx: Context, config: Config) {
     return null
   }
 
-  function blockText(b: unknown, depth: number): string {
+  // `skipReasoning` keeps the ANCHOR-MATCHING text aligned with what the model
+  // sees: the DeepSeek adapter moves `reasoning` blocks into the separate
+  // `reasoning_content` wire field (tool-call turns) or drops them (text
+  // turns), so the model's view of a message starts at its visible text — not
+  // at the reasoning the plugin would otherwise concatenate first. The archive
+  // keeps the full raw text (skipReasoning = false).
+  function blockText(b: unknown, depth: number, skipReasoning: boolean): string {
     if (depth > 5 || !b || typeof b !== 'object') return ''
     const blk = b as AnyBlock
+    if (skipReasoning && blk.type === 'reasoning') return ''
     if (typeof blk.text === 'string') return blk.text
     if (blk.type === 'tool-call') {
       return '[tool-call ' + String(blk.name ?? '') + '] ' + (typeof blk.arguments === 'string' ? blk.arguments : '')
     }
     if (blk.type === 'tool-result') {
-      return '[tool-result' + (blk.isError ? ' error' : '') + '] ' + blocksText(blk.content, depth + 1)
+      return '[tool-result' + (blk.isError ? ' error' : '') + '] ' + blocksText(blk.content, depth + 1, skipReasoning)
     }
     if (blk.type === 'image') return '[image]'
-    if (Array.isArray(blk.content)) return blocksText(blk.content, depth + 1)
+    if (Array.isArray(blk.content)) return blocksText(blk.content, depth + 1, skipReasoning)
     return ''
   }
 
-  function blocksText(blocks: unknown, depth: number): string {
+  function blocksText(blocks: unknown, depth: number, skipReasoning: boolean): string {
     if (!Array.isArray(blocks)) return ''
     let out = ''
-    for (const b of blocks) out += blockText(b, depth) + '\n'
+    for (const b of blocks) out += blockText(b, depth, skipReasoning) + '\n'
     return out
   }
 
-  function nodeText(n: SurfaceNode): string {
+  function nodeText(n: SurfaceNode, skipReasoning?: boolean): string {
     const blocks = nodeContent(n)
     if (!blocks) return ''
-    return blocksText(blocks, 0).replace(/\n+$/, '')
+    return blocksText(blocks, 0, skipReasoning ?? false).replace(/\n+$/, '')
   }
 
   function nodeErrorTag(n: SurfaceNode): string {
@@ -231,16 +241,16 @@ export function apply(ctx: Context, config: Config) {
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i]
       if (node.type !== 'user/message' && node.type !== 'assistant/message') continue
-      if (i === nodes.length - 1 && /\[tool-call/.test(nodeText(node))) continue
-      const n = normText(nodeText(node))
-      const s = strippedText(nodeText(node))
+      if (i === nodes.length - 1 && /\[tool-call/.test(nodeText(node, true))) continue
+      const n = normText(nodeText(node, true))
+      const s = strippedText(nodeText(node, true))
       if (n.startsWith(a) || s.startsWith(a)) hits.push(i)
     }
     return hits
   }
 
   function hitPreview(nodes: SurfaceNode[], hits: number[]): string {
-    return hits.map((i) => 'pos ' + i + ' | seq ' + nodes[i].seq + ' | ' + nodes[i].type + ': ' + preview(nodeText(nodes[i]), 80)).join('\n')
+    return hits.map((i) => 'pos ' + i + ' | seq ' + nodes[i].seq + ' | ' + nodes[i].type + ': ' + preview(nodeText(nodes[i], true), 80)).join('\n')
   }
 
   // Resolve one anchor to a unique node index, throwing with actionable hints.
@@ -300,12 +310,12 @@ export function apply(ctx: Context, config: Config) {
 
   function nearestHint(nodes: SurfaceNode[], anchorNorm: string): string {
     const scored = nodes
-      .map((n, i) => ({ i: i, score: anchorOverlap(nodeText(n), anchorNorm) }))
+      .map((n, i) => ({ i: i, score: anchorOverlap(nodeText(n, true), anchorNorm) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, 3)
       .filter((s) => s.score > 0)
     if (!scored.length) return ''
-    return scored.map((s) => 'pos ' + s.i + ' | seq ' + nodes[s.i].seq + ' | ' + nodes[s.i].type + ': ' + preview(nodeText(nodes[s.i]), 80)).join('\n')
+    return scored.map((s) => 'pos ' + s.i + ' | seq ' + nodes[s.i].seq + ' | ' + nodes[s.i].type + ': ' + preview(nodeText(nodes[s.i], true), 80)).join('\n')
   }
 
   function resolveBoundaries(nodes: SurfaceNode[], args: { startAnchor?: unknown; endAnchor?: unknown }): BoundaryResolveResult {
@@ -356,13 +366,52 @@ export function apply(ctx: Context, config: Config) {
     return parts.join('\n\n')
   }
 
-  async function archiveSpan(agent: AgentWithSession, spillStore: SpillStoreLike, nodes: SurfaceNode[], si: number, ei: number, suggestedName: string): Promise<SurfaceArchive | null> {
+  // Sequential per-session archive numbering. The local spill backend scopes
+  // files under root/session-<hash>/, so the next number is derived from what
+  // is ALREADY in that session dir (max numeric suffix + 1) — clean, gap-free,
+  // and restart-safe. The spill service exposes only saveText (no list API),
+  // so the root is duck-typed off the live LocalSpillStore instance; other
+  // backends without a `root` field degrade to the in-memory counter. No
+  // collision retry is needed: the backend prepends a random hex prefix to
+  // every filename, so two saves can never collide even with equal suffixes.
+  const archiveCounters = new Map<string, number>()
+
+  function spillRootOf(spillStore: SpillStoreLike): string | null {
+    const s = spillStore as unknown as { root?: unknown } | null
+    return s && typeof s.root === 'string' && s.root ? s.root : null
+  }
+
+  function sessionSpillDir(root: string, sessionId: string): string {
+    return join(root, 'session-' + createHash('sha256').update(sessionId).digest('hex').slice(0, 12))
+  }
+
+  // Largest numeric suffix already present in the session's spill dir, or 0.
+  async function maxArchiveNumber(root: string, sessionId: string): Promise<number> {
+    try {
+      const entries = await readdir(sessionSpillDir(root, sessionId))
+      let max = 0
+      for (const name of entries) {
+        const m = /-(\d+)\.txt$/.exec(name)
+        if (m) max = Math.max(max, Number(m[1]))
+      }
+      return max
+    } catch (e) {
+      return 0 // dir missing or unreadable: fall back to the in-memory counter
+    }
+  }
+
+  async function archiveSpan(agent: AgentWithSession, spillStore: SpillStoreLike, nodes: SurfaceNode[], si: number, ei: number): Promise<SurfaceArchive | null> {
     if (!spillStore) return null
     const content = spanText(nodes, si, ei)
+    const sid = agent.session.id
+    const root = spillRootOf(spillStore)
+    const scanned = root ? await maxArchiveNumber(root, sid) : 0
+    const n = Math.max(scanned, archiveCounters.get(sid) ?? 0) + 1
+    archiveCounters.set(sid, n)
     const ref = await spillStore.saveText({
-      owner: { sessionId: agent.session.id },
+      owner: { sessionId: sid },
       source: { toolName: 'context_compact', callId: null, label: 'auto-archive' },
-      suggestedName: suggestedName || 'context-compacted.txt',
+      suggestedName: String(n).padStart(6, '0') + '.txt',
       content: content,
     })
     return {
@@ -401,7 +450,6 @@ export function apply(ctx: Context, config: Config) {
       startAnchor: { type: 'string', description: 'Verbatim OPENING of the FIRST node of the span; must be a unique prefix of exactly one user/assistant message (whitespace-insensitive, [tool-*] markers ignored). REQUIRED to compress a MIDDLE span. WARNING: omitting it starts the span at the very FIRST node of the conversation, discarding the opening requirements and direction — only omit it when you deliberately want to compress ALL history up to endAnchor, or when the opening requirements are stale and you intend a rebaseline.' },
       endAnchor: { type: 'string', description: 'REQUIRED. Verbatim OPENING of the LAST node of the span (unique prefix of exactly one message). That node itself is replaced — pass its predecessor\'s opening to keep it.' },
       summary: { type: 'string', description: 'REQUIRED. The full Markdown checkpoint that replaces the span, written by YOU from the conversation content. Adapt the structure to the scene: Progress → ## sections Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction → what went wrong, root cause, the fix, what to keep doing next; Rebaseline → current intent, surviving decisions, plan ahead. Always: terse bullets; preserve exact paths/commands/identifiers and the user\'s requirements and direction; never a verbatim copy of the span (the engine rejects a summary not smaller than the compressed content).' },
-      name: { type: 'string', description: 'Optional. Archive file base name for the raw copy (backend sanitizes it). Default: context-compacted-<start>-<end>.txt.' },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
@@ -429,12 +477,11 @@ export function apply(ctx: Context, config: Config) {
       }
 
       const spillStore = resolveService(agent, 'spillStore') as SpillStoreLike | undefined
-      const defaultName = 'context-compacted-' + startSeq + '-' + endSeq + '.txt'
       let archived: SurfaceArchive | null = null
       let archiveError: JsonValue | null = null
       if (config.autoArchive && spillStore) {
         try {
-          archived = await archiveSpan(agent, spillStore, nodes, b.si, b.ei, typeof args.name === 'string' && args.name ? args.name : defaultName)
+          archived = await archiveSpan(agent, spillStore, nodes, b.si, b.ei)
         } catch (err) {
           archiveError = err && (err as Error).message ? (err as Error).message : String(err)
         }
@@ -492,7 +539,14 @@ export function apply(ctx: Context, config: Config) {
               const resultSeq = ev.seq
               const run = () => {
                 try {
-                  session.append('user/message', createShadowUserMessage('`context_compact` done: checkpoint above; raw span archived (see spill).'), {
+                  // Surface the archive locator so the model can read the raw
+                  // span back: the tool/result that carried it is shadowed below,
+                  // so without this the path would be lost.
+                  const locText = archived && archived.locator ? String(archived.locator) : ''
+                  const doneText = locText
+                    ? '`context_compact` done: checkpoint above; raw span archived at ' + locText + '.'
+                    : '`context_compact` done: checkpoint above; raw span not archived.'
+                  session.append('user/message', createShadowUserMessage(doneText), {
                     surfaceOp: { op: 'replace', start: assistantSeq, end: assistantSeq },
                     sourceEventSeqs: [assistantSeq],
                   })
