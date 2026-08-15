@@ -173,14 +173,6 @@ export function apply(ctx: Context, config: PluginConfig) {
     return snap && Array.isArray(snap.events) ? (snap.events as SurfaceNode[]) : []
   }
 
-  function surfaceOpLabel(n: SurfaceNode): string {
-    const op = n.surfaceOp
-    if (!op) return '?'
-    if (op === 'append') return 'append'
-    if (typeof op === 'object' && (op as { op?: string }).op === 'replace') return 'replace(summary-checkpoint)'
-    return '?'
-  }
-
   // ---- anchor-based boundary resolution ----
   // The model can skip context_surface entirely: it passes verbatim text of
   // the first node (startAnchor) and/or last node (endAnchor) of the span, and
@@ -213,13 +205,15 @@ export function apply(ctx: Context, config: PluginConfig) {
   }
 
   // exact (3) > prefix (2) > contains (1); -1 = no match
+  // contains is only allowed for anchors long enough to be distinctive, so a
+  // short anchor (e.g. a user message like "继续") cannot spray-match nodes.
   function matchScore(nodeRaw: string, anchorNorm: string): number {
     if (!anchorNorm) return -1
     const n = normText(nodeRaw)
     const s = strippedText(nodeRaw)
     if (n === anchorNorm || s === anchorNorm) return 3
     if (n.startsWith(anchorNorm) || s.startsWith(anchorNorm)) return 2
-    if (n.includes(anchorNorm) || s.includes(anchorNorm)) return 1
+    if (anchorNorm.length >= 24 && (n.includes(anchorNorm) || s.includes(anchorNorm))) return 1
     return -1
   }
 
@@ -274,7 +268,42 @@ export function apply(ctx: Context, config: PluginConfig) {
     detail: { startPos: number; endPos: number }
   }
 
-  function resolveBoundaries(nodes: SurfaceNode[], args: { start?: unknown; end?: unknown; startAnchor?: unknown; endAnchor?: unknown; fromStart?: unknown }): BoundaryResolveResult {
+  // Rank nodes by word overlap with an anchor, to suggest what to pass when a
+  // match fails. Cheap, deterministic, good enough for a hint.
+  function anchorOverlap(nodeRaw: string, anchorNorm: string): number {
+    const words = anchorNorm.split(' ').filter((w) => w.length > 2)
+    if (!words.length) return 0
+    const n = normText(nodeRaw)
+    let hit = 0
+    for (const w of words) {
+      if (n.includes(w)) hit++
+    }
+    return hit / words.length
+  }
+
+  function nearestHint(nodes: SurfaceNode[], anchorNorm: string): string {
+    const scored = nodes
+      .map((n, i) => ({ i: i, score: anchorOverlap(nodeText(n), anchorNorm) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .filter((s) => s.score > 0)
+    if (!scored.length) return ''
+    return scored.map((s) => 'pos ' + s.i + ' | seq ' + nodes[s.i].seq + ' | ' + nodes[s.i].type + ': ' + preview(nodeText(nodes[s.i]), 80)).join('\n')
+  }
+
+  // An anchor can accidentally match the CURRENT in-flight turn's tool-call
+  // node (the call's own arguments become part of the surface). That node is
+  // not a usable boundary: its results have not landed yet and it is an open,
+  // unbalanced step. Skip it and keep looking at earlier nodes.
+  function findAnchorIndexSkippingOpen(nodes: SurfaceNode[], anchor: string, prefer: 'first' | 'last'): number {
+    const idx = findAnchorIndex(nodes, anchor, prefer)
+    if (idx === nodes.length - 1 && /\[tool-call/.test(nodeText(nodes[idx]))) {
+      return findAnchorIndex(nodes.slice(0, -1), anchor, prefer)
+    }
+    return idx
+  }
+
+  function resolveBoundaries(nodes: SurfaceNode[], args: { start?: unknown; end?: unknown; startAnchor?: unknown; endAnchor?: unknown }): BoundaryResolveResult {
     if (!nodes.length) throw new Error('surface is empty; nothing to compact')
     const startNum = args.start === undefined || args.start === null ? NaN : Number(args.start)
     const endNum = args.end === undefined || args.end === null ? NaN : Number(args.end)
@@ -282,9 +311,9 @@ export function apply(ctx: Context, config: PluginConfig) {
     const endOk = Number.isInteger(endNum)
     const startAnchor = typeof args.startAnchor === 'string' && args.startAnchor.trim() ? args.startAnchor : ''
     const endAnchor = typeof args.endAnchor === 'string' && args.endAnchor.trim() ? args.endAnchor : ''
-    const fromStart = args.fromStart === true
-    if (!startOk && !startAnchor && !fromStart && !endOk) {
-      throw new Error('cannot resolve boundaries: provide start/end seqs, or startAnchor/endAnchor text (or fromStart: true plus endAnchor)')
+    // The end side is REQUIRED to bound the span; start defaults to the first node.
+    if (!endOk && !endAnchor) {
+      throw new Error('cannot resolve the end boundary: provide end (seq) or endAnchor (verbatim text of the LAST node of the span to compress; that node itself is compressed — use its predecessor to keep it)')
     }
     let si = -1
     let ei = -1
@@ -294,10 +323,13 @@ export function apply(ctx: Context, config: PluginConfig) {
       if (si === -1) throw new Error('start seq ' + startNum + ' not found on the current surface')
       method.push('start=seq')
     } else if (startAnchor) {
-      si = findAnchorIndex(nodes, startAnchor, 'first')
-      if (si === -1) throw new Error('startAnchor not found on the surface: ' + preview(startAnchor, 120))
+      si = findAnchorIndexSkippingOpen(nodes, startAnchor, 'first')
+      if (si === -1) {
+        const hint = nearestHint(nodes, normText(startAnchor))
+        throw new Error('startAnchor not found on the surface: ' + preview(startAnchor, 120) + (hint ? '\nclosest nodes:\n' + hint : ''))
+      }
       method.push('start=anchor')
-    } else if (fromStart) {
+    } else {
       si = 0
       method.push('start=first')
     }
@@ -305,13 +337,13 @@ export function apply(ctx: Context, config: PluginConfig) {
       ei = findSeqIndex(nodes, endNum)
       if (ei === -1) throw new Error('end seq ' + endNum + ' not found on the current surface')
       method.push('end=seq')
-    } else if (endAnchor) {
-      ei = findAnchorIndex(nodes, endAnchor, 'last')
-      if (ei === -1) throw new Error('endAnchor not found on the surface: ' + preview(endAnchor, 120))
+    } else {
+      ei = findAnchorIndexSkippingOpen(nodes, endAnchor, 'last')
+      if (ei === -1) {
+        const hint = nearestHint(nodes, normText(endAnchor))
+        throw new Error('endAnchor not found on the surface: ' + preview(endAnchor, 120) + (hint ? '\nclosest nodes:\n' + hint : ''))
+      }
       method.push('end=anchor')
-    }
-    if (si === -1 || ei === -1) {
-      throw new Error('cannot resolve both boundaries: provide start/end seqs, or startAnchor/endAnchor text (or fromStart: true plus endAnchor)')
     }
     if (si > ei) {
       throw new Error('resolved start sits after resolved end on the surface (start pos ' + si + ', end pos ' + ei + ')')
@@ -381,89 +413,13 @@ export function apply(ctx: Context, config: PluginConfig) {
   const disposers: (() => void)[] = []
 
   disposers.push(tools.register(defineTool({
-    name: 'context_surface',
-    description: 'List the current conversation surface: every message node the model currently sees, in order, with its seq, surface position (pos), type, surface op, character length and a short preview. The SEQ values are what you pass as inclusive start/end to context_compact and context_archive. Always re-run this tool after a compaction: the surface changes and a summary checkpoint node (op = replace(summary-checkpoint)) appears.',
-    parameters: {
-      offset: { type: 'integer', description: 'Skip this many leading nodes. Default 0.' },
-      limit: { type: 'integer', description: 'Return at most this many nodes. Default 200.' },
-      previewChars: { type: 'integer', description: 'Preview length per node. Default 120.' },
-    },
-    output: {
-      schema: { type: 'object', additionalProperties: true },
-      render(args, value) { return [{ type: 'text', text: JSON.stringify(value) }] },
-    },
-    async execute(args, exec) {
-      const agent = agentOf(exec)
-      if (!agent) throw new Error('no agent session available for this call')
-      const nodes = await readSurfaceNodes(agent)
-      if (nodes === null) throw new Error('sessionQuery service is not available in this runtime')
-      const offset = Math.max(0, Number(args.offset) || 0)
-      const limit = Math.max(1, Number(args.limit) || 200)
-      const pc = Math.max(1, Number(args.previewChars) || 120)
-      const rows: { seq: number; pos: number; type: string; op: string; chars: number; preview: string }[] = []
-      for (let i = offset; i < nodes.length && rows.length < limit; i++) {
-        const n = nodes[i]
-        const text = nodeText(n)
-        rows.push({ seq: n.seq, pos: i, type: n.type as string, op: surfaceOpLabel(n), chars: text.length, preview: preview(text, pc) })
-      }
-      return {
-        sessionId: agent.session.id,
-        total: nodes.length,
-        count: rows.length,
-        offset: offset,
-        note: 'Pass SEQ values (not pos) as inclusive start/end to context_compact / context_archive. The backend locates them on the surface by seq; start must sit at or before end on the surface.',
-        nodes: rows,
-      }
-    },
-  })))
-
-  disposers.push(tools.register(defineTool({
-    name: 'context_archive',
-    description: 'Backup ONLY: save the full raw text of a surface span to a session-scoped spill artifact, without touching the surface. Locate the span either by boundary seqs (start/end, from context_surface) or by ANCHOR TEXT — copy the verbatim content of the first node (startAnchor) and last node (endAnchor) of the span; the tool resolves them on the CURRENT surface by normalized text match (first occurrence for start, last for end), so anchors never go stale after earlier compactions. Use it when you want a durable copy of a span you are NOT about to compress yet. When you ARE compacting, context_compact already archives the raw span automatically, so you do not need this tool. Returns a locator plus a retrievalHint that tells how to read the raw text later (e.g. with the read tool) if the summary turns out too thin.',
-    parameters: {
-      start: { type: 'integer', description: 'Inclusive start boundary seq (from context_surface). Alternative to startAnchor.' },
-      end: { type: 'integer', description: 'Inclusive end boundary seq (from context_surface). Alternative to endAnchor.' },
-      startAnchor: { type: 'string', description: 'Verbatim text of the FIRST node of the span (its beginning). Exact/prefix/contains match, whitespace-insensitive, [tool-*] markers ignored; first occurrence wins. Alternative to start.' },
-      endAnchor: { type: 'string', description: 'Verbatim text of the LAST node of the span (what the span ends with). Matched like startAnchor but last occurrence wins. Alternative to end.' },
-      fromStart: { type: 'boolean', description: 'Start the span at the very first surface node (ignored when start or startAnchor is given).' },
-      name: { type: 'string', description: 'Suggested artifact base name, e.g. wrong-direction-analysis.txt (backend sanitizes it to one safe path segment).' },
-    },
-    output: {
-      schema: { type: 'object', additionalProperties: true },
-      render(args, value) { return [{ type: 'text', text: JSON.stringify(value) }] },
-    },
-    async execute(args, exec) {
-      const agent = agentOf(exec)
-      if (!agent) throw new Error('no agent session available for this call')
-      const spillStore = resolveService(agent, 'spillStore') as SpillStoreLike | undefined
-      if (!spillStore) throw new Error('spillStore service is not available in this runtime (tried host plane and preset realm)')
-      const nodes = await readSurfaceNodes(agent)
-      if (nodes === null) throw new Error('sessionQuery service is not available in this runtime')
-      const b = resolveBoundaries(nodes, args)
-      const ref = await archiveSpan(agent, spillStore, nodes, b.si, b.ei, typeof args.name === 'string' && args.name ? args.name : 'context-archive.txt')
-      if (!ref) throw new Error('spillStore failed to save the span')
-      return {
-        sessionId: agent.session.id,
-        boundarySeqs: { start: b.startSeq, end: b.endSeq },
-        boundaryMethod: b.method,
-        archivedSeqs: ref.archivedSeqs,
-        chars: ref.chars,
-        locator: ref.locator,
-        bytes: ref.bytes,
-        retrievalHint: ref.retrievalHint,
-      }
-    },
-  })))
-
-  disposers.push(tools.register(defineTool({
     name: 'context_compact',
-    description: 'Agent-controlled context compression, one step: FIRST saves the full raw text of the surface span to a session-scoped spill artifact (auto-archive), THEN replaces the span with ONE summary node. Locate the span either by boundary seqs (start/end, from context_surface) or by ANCHOR TEXT — no context_surface call needed: copy the verbatim content of the first node (startAnchor) and/or last node (endAnchor) of the span, e.g. the leading lines of your own last tool result; the tool resolves them on the CURRENT surface by normalized text match (first occurrence for start, last for end), so repeated compactions never hit stale seqs. Omit start entirely by passing fromStart: true. Matched edges are snapped to balanced tool-call/result boundaries. The compaction engine is upgraded by this plugin: the summarization input is the FULL context up to the region end (maximizing KV-cache reuse via a genuine prefix of the last routed request) plus a scoped instruction that compresses only messages #k..#m. Constraints enforced by the backend: both boundary seqs must exist on the current surface, start must sit at or before end, both edges must be balanced (never split an assistant tool-call/result pair, end boundary step must be closed), and only one compaction may run per session at a time. Keep the still-active user instruction out of the range.',
+    description: 'Agent-controlled context compression, one step: FIRST saves the full raw text of the surface span to a session-scoped spill artifact (auto-archive), THEN replaces the span with ONE summary checkpoint node. Locate the span by ANCHOR TEXT — no context_surface call needed: copy the verbatim content of the LAST node of the span as endAnchor (e.g. the leading lines of your own last tool result); the tool resolves it on the CURRENT surface by normalized text match (exact > prefix > contains, whitespace-insensitive, [tool-*] markers ignored; LAST occurrence wins) and compresses [firstNode..endAnchor] inclusively — the endAnchor node itself IS compressed, so pass its predecessor to keep it. For a mid-conversation span also pass startAnchor (verbatim content of the FIRST node of the span; FIRST occurrence wins). start/end seqs are optional alternatives. Matched edges are snapped to balanced tool-call/result boundaries. A failed match throws with the closest node previews to help you pick the right text. The compaction engine is upgraded by this plugin: the summarization input is the FULL context up to the region end (maximizing KV-cache reuse via a genuine prefix of the last routed request) plus a scoped instruction that compresses only messages #k..#m. Constraints: both boundary seqs must exist on the current surface, start must sit at or before end, both edges must be balanced (never split an assistant tool-call/result pair, end boundary must be closed), and only one compaction may run per session at a time. Keep the still-active user instruction out of the range. The raw span is archived: read it back later via the returned locator/retrievalHint.',
     parameters: {
-      start: { type: 'integer', description: 'Inclusive start boundary seq (from context_surface). Alternative to startAnchor / fromStart.' },
-      end: { type: 'integer', description: 'Inclusive end boundary seq (from context_surface). Alternative to endAnchor.' },
-      startAnchor: { type: 'string', description: 'Verbatim text of the FIRST node of the span (its beginning). Exact/prefix/contains match, whitespace-insensitive, [tool-*] markers ignored; first occurrence wins. Alternative to start.' },
-      endAnchor: { type: 'string', description: 'Verbatim text of the LAST node of the span (what the span ends with). Matched like startAnchor but last occurrence wins. Alternative to end.' },
-      fromStart: { type: 'boolean', description: 'Start the span at the very first surface node (ignored when start or startAnchor is given).' },
+      start: { type: 'integer', description: 'Inclusive start boundary seq. Optional — defaults to the very first surface node.' },
+      end: { type: 'integer', description: 'Inclusive end boundary seq (the last node to compress). Alternative to endAnchor.' },
+      startAnchor: { type: 'string', description: 'Verbatim text of the FIRST node of the span (its beginning). Exact/prefix/contains match, whitespace-insensitive, [tool-*] markers ignored; first occurrence wins. Optional — defaults to the first node.' },
+      endAnchor: { type: 'string', description: 'REQUIRED unless end is given. Verbatim text of the LAST node of the span (what the span ends with — that node itself is compressed; pass its predecessor to keep it). Matched like startAnchor but last occurrence wins.' },
       note: { type: 'string', description: 'Optional short note: why this range is finished and what the summary must preserve for later steps. Echoed in the result only.' },
       name: { type: 'string', description: 'Optional suggested archive file name for the auto-archived raw copy (backend sanitizes it). Default: context-compacted-<start>-<end>.txt.' },
     },
@@ -511,6 +467,7 @@ export function apply(ctx: Context, config: PluginConfig) {
         compactionId: JsonValue
         boundarySeqs: { start: number; end: number }
         boundaryMethod: string
+        surfaceTotal: number
         shadowedRange: { start: number; end: number } | null
         shadowedSeqs: JsonValue[]
         shadowedTokenCount: JsonValue | null
@@ -527,6 +484,7 @@ export function apply(ctx: Context, config: PluginConfig) {
         compactionId: result.compactionId,
         boundarySeqs: { start: startSeq, end: endSeq },
         boundaryMethod: b.method,
+        surfaceTotal: nodes.length,
         shadowedRange: result.shadowedRange ? { start: result.shadowedRange.start, end: result.shadowedRange.end } : null,
         shadowedSeqs: Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs : [],
         shadowedTokenCount: result.shadowedTokenCount ?? null,
@@ -541,7 +499,7 @@ export function apply(ctx: Context, config: PluginConfig) {
           archivedSeqs: archived.archivedSeqs,
         } : null,
         archiveError: archiveError,
-        advice: 'Re-run context_surface: the span is now one summary checkpoint node and the surface changed. If the summary turns out too thin, read the archived raw copy using the retrievalHint.',
+        advice: 'The span is now one summary checkpoint node and the surface shrank (see surfaceTotal). If the summary turns out too thin, read the archived raw copy using the retrievalHint.',
       }
       if (typeof args.note === 'string') out.note = args.note
       return out
