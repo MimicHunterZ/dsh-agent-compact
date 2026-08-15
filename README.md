@@ -14,6 +14,16 @@ Typical moments to use it:
 - a bug hunt or a wrong research direction is over — compress that exchange into a short "what went wrong / root cause / fix" note;
 - the opening requirements are stale — compress the start and restate the current intent.
 
+## Managing context like human memory
+
+People work the same way: recent events are remembered clearest and kept as-is; the middle is never wiped wholesale — what can be summarized becomes key points, while important details are remembered word-for-word. `context_compact` lets the agent manage the conversation the same way:
+
+- **Recent context** — stays verbatim, untouched;
+- **The middle** — not compressed indiscriminately: what can be summarized (a finished step, a debugged log exchange, an off-track discussion) is consolidated into a checkpoint, and important details are kept **word-for-word** inside the checkpoint;
+- **The opening direction** — the task plan and intent stay intact.
+
+Compression is therefore not "losing information" but **selective consolidation**, like memory: forgettable parts get summarized, and what matters keeps every word.
+
 ## What it does
 
 - The agent picks the span via `startAnchor` / `endAnchor` (unique-prefix matching, CJK punctuation-width tolerant) and passes a **required** `summary` — the Markdown checkpoint it wrote itself.
