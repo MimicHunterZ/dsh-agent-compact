@@ -36,6 +36,16 @@ dsh plugin --profile web add ./agent-compact
 
 插件自带的 `cordis.patch.yml` 会把 spill 归档根目录固定到 `~/.dsh/spill`(部署可用 profile 的 `cordis.patch.yml` 再覆盖)。
 
+## 卸载
+
+```sh
+dsh plugin --profile web remove @mimichunterz/agent-compact
+```
+
+`dsh plugin remove` 在 profile 目录内转发给 `pnpm remove`:卸载包,并把 bundle 从 `dsh.profile.bundles` 中剔除。**重启 profile 后**,所有会话都不再看到 `context_compact` 工具。无论当初是从发布仓库还是本地目录安装的,卸载都用同一个包名。
+
+如果插件是通过 profile 的 `cordis.patch.yml` 行挂载的(dev 模式),还需要把那一行删掉,否则下次启动 patch 会把它重新挂上。
+
 ## 配置
 
 | 字段 | 默认 | 说明 |

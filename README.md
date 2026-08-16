@@ -36,6 +36,16 @@ dsh plugin --profile web add ./agent-compact
 
 The bundle's own `cordis.patch.yml` pins the spill archive root to `~/.dsh/spill` (deployments can override it again through the profile's `cordis.patch.yml`).
 
+## Uninstall
+
+```sh
+dsh plugin --profile web remove @mimichunterz/agent-compact
+```
+
+`dsh plugin remove` forwards to `pnpm remove` in the profile directory: it uninstalls the package and reconciles the bundle out of `dsh.profile.bundles`. **Restart the profile** — every session then stops seeing the `context_compact` tool. The same package name works whether you installed from the registry or from a local checkout.
+
+If the plugin was additionally mounted through a row in the profile's `cordis.patch.yml` (dev mode), remove that row too, otherwise the patch re-mounts it on the next boot.
+
 ## Configuration
 
 | field | default | meaning |
