@@ -30,14 +30,16 @@ export const Config: Schema<Config> = Schema.object({
 })
 
 export function apply(ctx: Context, config: Config) {
-  // NOTE: sessionQuery is deliberately NOT captured here. It is resolved per
-  // call through resolveService() (like spillStore/compaction): the
-  // session-query-sqlite row mounts only after its own `sessions` dependency
-  // chain is up, so capturing `ctx.get('sessionQuery')` at apply time raced
-  // the boot order and intermittently left the context_compact tool broken
-  // ('sessionQuery service is not available in this runtime') on processes
-  // where this plugin's apply won the race.
-  const agentPresets = ctx.get('agentPresets')
+  // NOTE: sessionQuery AND agentPresets are deliberately NOT captured here.
+  // Both are resolved per call through resolveService(): the session-query
+  // sqlite row and the agent-presets registry mount only after their own
+  // dependency chains are up, so capturing `ctx.get('sessionQuery')` or
+  // `ctx.get('agentPresets')` at apply time raced the boot order and left the
+  // context_compact tool broken ('compaction service is not available in this
+  // runtime (tried host plane and preset realm)') on processes where this
+  // plugin's apply won the race — the tool row injects only `tools` (provided
+  // by the dsh-base bundle), which is up before the web-app bundle's
+  // agent-presets row registers.
   const tools = ctx.get('tools')
   if (!tools) throw new Error('@mimichunterz/agent-compact: tools service unavailable')
 
@@ -120,9 +122,16 @@ export function apply(ctx: Context, config: Config) {
   function resolveService(agent: AgentLike, serviceName: string): unknown {
     const direct = ctx.get(serviceName)
     if (direct) return direct
-    if (agentPresets && agentPresets.serviceFor && agent && agent.ctx) {
+    // agentPresets is resolved PER CALL (never captured at apply time): the
+    // agent-presets registry mounts only after its own dependency chain is up,
+    // and this bundle row injects only `tools`, so a boot-time capture races
+    // the registry and permanently kills the preset-realm path. Same reason
+    // sessionQuery is resolved per call below.
+    const agentPresets = ctx.get('agentPresets')
+    const presets = agentPresets as { serviceFor?: (agent: { ctx: unknown }, name: string) => unknown } | undefined
+    if (presets && typeof presets.serviceFor === 'function' && agent && agent.ctx) {
       try {
-        const viaPreset = agentPresets.serviceFor({ ctx: agent.ctx }, serviceName)
+        const viaPreset = presets.serviceFor({ ctx: agent.ctx }, serviceName)
         if (viaPreset) return viaPreset
       } catch (e) {
         /* fall through */
