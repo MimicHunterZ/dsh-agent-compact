@@ -15,6 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createShadowUserMessage } from './shadow-message.js'
 import { patchEngine } from './optimizer.js'
 import { normText } from './normalize.js'
+import { CtxSurfaceService } from './ctx-surface.js'
 import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode } from './optimizer.js'
 
 export const name = 'tool-context-compression'
@@ -42,6 +43,12 @@ export function apply(ctx: Context, config: Config) {
   // agent-presets row registers.
   const tools = ctx.get('tools')
   if (!tools) throw new Error('@mimichunterz/agent-compact: tools service unavailable')
+
+  // Provide the live-surface reader for the browser "上下文" panel. Constructing
+  // the TypertRemoteService registers the `ctxSurface` service (and its
+  // `ctxSurface/read` gateway endpoint) for this plugin's fiber; the client
+  // bundle mounts the matching descriptors and calls ctx.remote.ctxSurface.read.
+  new CtxSurfaceService(ctx)
 
   interface AgentWithSession extends AgentLike {
     session: SessionLike
