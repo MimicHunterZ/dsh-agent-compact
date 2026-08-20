@@ -20,7 +20,7 @@ import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode } from '.
 
 export const name = 'tool-context-compression'
 
-export const inject = ['tools']
+export const inject = ['tools', 'systemPrompt']
 
 export interface Config {
   autoArchive: boolean
@@ -460,6 +460,22 @@ export function apply(ctx: Context, config: Config) {
   }
 
   const disposers: (() => void)[] = []
+
+  // Host-level system-prompt guidance for `context_compact`: this bundle mounts
+  // at host level, so the section lands on the GLOBAL prompt layer and every
+  // session reads it (same reach as the tool itself). Order 118 sits directly
+  // after the per-tool guidance band (100-117), so the proactive-compaction
+  // emphasis is read right after the tool usage sections. systemPrompt is a
+  // declared hard dependency (inject), so it is guaranteed present at apply
+  // time — Cordis parks this plugin until the registry is up.
+  const systemPrompt = ctx.get('systemPrompt')
+  if (systemPrompt) {
+    disposers.push(systemPrompt.section({
+      name: 'tool:context_compact',
+      order: 118,
+      text: 'Use the context_compact tool to proactively externalize conversation spans that have served their purpose, the way a smart human memory keeps what matters and lets go of the rest — routine memory hygiene, not a last resort. Compress only a span whose information a summary fully covers for the rest of the conversation; if verbatim detail may still be needed, leave it. The tool replaces only the span you select: compress in segments when important text sits inside a dead region, and compress large outputs (log queries, big file reads) as soon as they are read and digested. Evaluate whenever a span has been used up, not only at topic boundaries, and never compress the opening, the in-flight task, or the active instruction; preserve exact paths, commands, IDs, and the user\'s requirements in the checkpoint.',
+    }))
+  }
 
   disposers.push(tools.register(defineTool({
     name: 'context_compact',

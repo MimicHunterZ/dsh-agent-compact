@@ -31,9 +31,17 @@ export interface CtxSurfaceReadRequest {
   readonly sessionId: string
 }
 
-export type CtxSurfaceReadResult =
-  | { readonly ok: true; readonly value: { readonly rows: readonly CtxSurfaceRow[] } }
-  | { readonly ok: false; readonly error: { readonly code: string; readonly message?: string } }
+// NOTE: the Typert Remote transport already wraps this method's outcome in
+// its own `{ok:true,value}` / `{ok:false,error}` envelope on the wire — do
+// NOT repeat that shape here. An earlier version returned a second, business
+// -level {ok,value}|{ok:false,error} union, which produced a DOUBLE-WRAPPED
+// result (`{ok:true,value:{ok:true,value:{rows}}}`); the browser panel only
+// unwraps one level, so `result.value.rows` was always undefined and the
+// panel showed "暂无 surface 消息" even though the host had real rows. Throw
+// on failure instead; the transport turns that into the wire-level error.
+export interface CtxSurfaceReadResult {
+  readonly rows: readonly CtxSurfaceRow[]
+}
 
 // ---- host-only helpers ----
 
@@ -202,7 +210,7 @@ export class CtxSurfaceService extends TypertRemoteService {
   async read(request: CtxSurfaceReadRequest): Promise<CtxSurfaceReadResult> {
     const sessionQuery = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
     if (!sessionQuery) {
-      return { ok: false, error: { code: 'session-query-unavailable' } }
+      throw new Error('session-query-unavailable')
     }
     let snap: { events?: unknown } | null
     try {
@@ -210,7 +218,7 @@ export class CtxSurfaceService extends TypertRemoteService {
     } catch (err) {
       const message = err && (err as Error).message ? (err as Error).message : String(err)
       this.ctx.logger.warn('[agent-compact] ctxSurface/read failed for %s: %s', request.sessionId, message)
-      return { ok: false, error: { code: 'read-failed', message } }
+      throw new Error(message)
     }
     const events = snap && Array.isArray(snap.events) ? (snap.events as unknown[]) : []
     const rows: CtxSurfaceRow[] = []
@@ -219,6 +227,6 @@ export class CtxSurfaceService extends TypertRemoteService {
       const row = rowOf(ev as SurfaceNodeLike)
       if (row) rows.push(row)
     }
-    return { ok: true, value: { rows } }
+    return { rows }
   }
 }
