@@ -24,10 +24,12 @@ export const inject = ['tools', 'systemPrompt']
 
 export interface Config {
   autoArchive: boolean
+  volumeNudgeTokens: number
 }
 
 export const Config: Schema<Config> = Schema.object({
   autoArchive: Schema.boolean().default(true).description('context_compact saves the full raw span to a spill artifact before replacing it.'),
+  volumeNudgeTokens: Schema.number().default(20000).description('Every time accumulated tool-result output (heuristic token count) since the last compaction crosses another multiple of this amount, remind the model to consider context_compact. Set to 0 to disable.'),
 })
 
 export function apply(ctx: Context, config: Config) {
@@ -124,6 +126,96 @@ export function apply(ctx: Context, config: Config) {
     arguments?: unknown
     isError?: unknown
     content?: unknown
+  }
+
+  // ---- volume-nudge: cold-start proactive-compaction reminder ----
+  //
+  // The static system-prompt section above only tells the model WHAT good
+  // judgment looks like; it carries no live signal for WHEN to act, so a
+  // "read some logs, found the bug, now compact" moment has nothing concrete
+  // to trigger on (discussed at length with the user — see conversation).
+  // This closes that gap with a mechanical, model-agnostic proxy: how much
+  // the session's occupancy has grown since its last compaction, and once
+  // that growth crosses another multiple of config.volumeNudgeTokens, say
+  // so. Deliberately NOT tied to the model's context-window ratio or the
+  // compaction engine's own pressure threshold — the user was explicit that
+  // ratio-vs-threshold is "the system's own job" (dsh-compaction-basic
+  // already auto-compacts at 80% window pressure via agent/pre-step); this is
+  // a separate, size-based nudge toward doing it EARLIER with model-curated
+  // judgment, not a replacement safety net.
+  //
+  // Deliberately measures the WHOLE occupancy, not just tool results: the
+  // model's own reasoning/prose is real growth too (often the bigger half
+  // with a reasoning model), so a tool-result-only counter would
+  // systematically under-count and never fire for a verbose, tool-light
+  // stretch of the conversation.
+  //
+  // Metric, in preference order (the user pushed back on settling for a pure
+  // heuristic — this is the more accurate answer that pushback surfaced):
+  //
+  //  1. ctx.sessionProjections.snapshot(session).values.contextPressure
+  //     .projectedTokens — dsh-token-meter's own occupancy projection.
+  //     `pressureTokens` underneath it is NOT a heuristic: it is
+  //     `usage.inputTokens + cacheReadTokens + cacheWriteTokens` read
+  //     straight off the provider's OWN wire `usage` block (DeepSeek's real
+  //     tokenizer count for that exact request — see `mapUsage()` in
+  //     dsh-llm-deepseek/lib/index.js and `pressureFrom()` in
+  //     dsh-token-meter/lib/index.js). `projectedTokens` adds only the
+  //     surface's signed movement since that sample was taken, so estimation
+  //     error can never compound for more than one request's worth of new
+  //     content — it resyncs to ground truth on every single LLM call.
+  //  2. ctx.tokenMeter.measure(session).surfaceTokens — the same fixed
+  //     chars/4 heuristic (CHARS_PER_TOKEN = 4 in dsh-token-meter/lib/index.js)
+  //     the real pressure-based auto-compactor prices against. Used only when
+  //     (1) is unavailable, e.g. no request has completed yet this session.
+  //
+  // Both fold incrementally per session (cheap to call every step) and
+  // naturally reflect anything else that shrinks the surface (e.g.
+  // toolResultPruner, compaction itself) without us tracking it separately.
+  // Reading either costs nothing extra when the service is absent — the
+  // whole feature just no-ops down to the next available layer.
+  const volumeBaseline = new WeakMap<SessionLike, number>()
+
+  interface TokenMeterLike {
+    measure(session: SessionLike): { surfaceTokens?: number } | null | undefined
+  }
+
+  interface SessionProjectionsLike {
+    snapshot(session: SessionLike): { values?: Record<string, unknown> } | null | undefined
+  }
+
+  function surfaceTokensOf(session: SessionLike): number | null {
+    const meter = ctx.get('tokenMeter') as TokenMeterLike | undefined
+    if (!meter || typeof meter.measure !== 'function') return null
+    try {
+      const m = meter.measure(session)
+      const tokens = m && typeof m.surfaceTokens === 'number' ? m.surfaceTokens : null
+      return tokens
+    } catch (e) {
+      return null
+    }
+  }
+
+  function contextPressureProjectedTokensOf(session: SessionLike): number | null {
+    const projections = ctx.get('sessionProjections') as SessionProjectionsLike | undefined
+    if (!projections || typeof projections.snapshot !== 'function') return null
+    try {
+      const snap = projections.snapshot(session)
+      const values = snap && snap.values
+      const contextPressure = values ? (values as { contextPressure?: { projectedTokens?: unknown } }).contextPressure : undefined
+      const projected = contextPressure && typeof contextPressure.projectedTokens === 'number' ? contextPressure.projectedTokens : null
+      return projected
+    } catch (e) {
+      return null
+    }
+  }
+
+  // Best available occupancy metric for `session` — see the long comment
+  // above for why (1) is preferred over (2).
+  function occupancyTokensOf(session: SessionLike): number | null {
+    const projected = contextPressureProjectedTokensOf(session)
+    if (projected !== null) return projected
+    return surfaceTokensOf(session)
   }
 
   function resolveService(agent: AgentLike, serviceName: string): unknown {
@@ -489,6 +581,61 @@ export function apply(ctx: Context, config: Config) {
     }))
   }
 
+  // Reset the growth baseline whenever this session actually compacts — ours
+  // or the automatic engine's, either one means "the surface just got
+  // trimmed, measure growth from here" (same 'compaction/summary' detection
+  // pattern findSummaryUsage uses above).
+  disposers.push(ctx.on('session/event', (session: SessionLike | undefined, event: SessionEventLike) => {
+    try {
+      if (!session || event.type !== 'compaction/summary') return
+      const tokens = occupancyTokensOf(session)
+      volumeBaseline.set(session, tokens ?? 0)
+    } catch (e) {
+      /* ignore */
+    }
+  }))
+
+  // Live, tail-positioned nudge via systemPrompt.context() — NOT .section():
+  // this becomes the LAST message before the model generates on every step
+  // (see dsh-agent-loop's preStep: `[...claimed, context]`), not a
+  // system-prompt prefix, and a step whose returned text is unchanged from
+  // last step is a total no-op (RuntimeContextProjection.project() only
+  // writes on an actual text change) — so this only touches the KV cache on
+  // the exact steps where growth crosses another config.volumeNudgeTokens
+  // multiple. Deliberately independent of context-window ratio/thresholds —
+  // that is the automatic engine's own job (agent/pre-step pressure
+  // compaction in dsh-compaction-basic); this is a separate, size-based nudge
+  // toward doing it earlier with model-curated judgment.
+  if (systemPrompt) {
+    disposers.push(systemPrompt.context({
+      name: 'agent-compact:volume-nudge',
+      order: 50,
+      text: () => {
+        try {
+          const threshold = config.volumeNudgeTokens
+          if (!(threshold > 0)) return ''
+          const agentsService = ctx.get('agents')
+          const current = agentsService && typeof (agentsService as { currentInitiator?: unknown }).currentInitiator === 'function'
+            ? (agentsService as { currentInitiator: () => unknown }).currentInitiator()
+            : undefined
+          const agent = current as { session?: SessionLike } | undefined
+          if (!agent || !agent.session) return ''
+          const now = occupancyTokensOf(agent.session)
+          if (now === null) return ''
+          const baseline = volumeBaseline.get(agent.session) ?? 0
+          const grown = now - baseline
+          if (grown <= 0) return ''
+          const bucket = Math.floor(grown / threshold)
+          if (bucket <= 0) return ''
+          const approxK = Math.round((bucket * threshold) / 1000)
+          return '`context_compact` reminder: this session\'s surface has grown by roughly ' + approxK + 'k+ tokens since the last compaction (tool results AND your own reasoning/output both count). If the work that produced it has reached a conclusion, compact that span now with `context_compact` — do not wait to be asked.'
+        } catch (e) {
+          return ''
+        }
+      },
+    }))
+  }
+
   disposers.push(tools.register(defineTool({
     name: 'context_compact',
     description: 'Compress a past conversation span into one Markdown checkpoint you write; the raw span is archived to a spill artifact, the compaction recorded. Anchor matching: anchors match the opening text of a message body (user/assistant messages only; tool-call blocks, tool results, and other transcript structure excluded). Whitespace, tool-call markers, and full/half-width punctuation differences are ignored; each anchor must match exactly one user or assistant message. When to compact: ① Progress — compact each finished step at its topic boundary, keeping the active instruction and remaining steps live; ② Course correction — compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying noise forward; ③ Rebaseline — stale opening requirements: compact the start too, restating current intent and what survives. Checkpoint: Markdown, terse bullets, ## sections; keep exact paths/commands/IDs and the user\'s requirements and direction. Per scene — Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction: what went wrong / root cause / fix / next; Rebaseline: current intent / surviving decisions / plan ahead. Constraints: one compaction per session at a time; checkpoint must be smaller than the compressed span; edges snap to balanced tool-call/result boundaries.',
@@ -589,14 +736,25 @@ export function apply(ctx: Context, config: Config) {
                   // span back: the tool/result that carried it is shadowed below,
                   // so without this the path would be lost.
                   const locText = archived && archived.locator ? String(archived.locator) : ''
-                  const doneText = locText
-                    ? '`context_compact` done: checkpoint above; raw span archived at ' + locText + '.'
-                    : '`context_compact` done: checkpoint above; raw span not archived.'
+                  const freedText = result.shadowedTokenCount !== undefined && result.shadowedTokenCount !== null
+                    ? '; freed ~' + String(result.shadowedTokenCount) + ' tokens'
+                    : ''
+                  const doneText = '`context_compact` done: checkpoint above' + freedText + (locText
+                    ? '; raw span archived at ' + locText + '.'
+                    : '; raw span not archived.')
                   session.append('user/message', createShadowUserMessage(doneText), {
                     surfaceOp: { op: 'replace', start: assistantSeq, end: assistantSeq },
                     sourceEventSeqs: [assistantSeq],
                   })
-                  session.append('user/message', createShadowUserMessage('`context_compact` result shadowed.'), {
+                  // This second placeholder is the LAST thing the model reads
+                  // before it keeps going — closer to the next decision point
+                  // than any static system-prompt section could be. Reuse that
+                  // slot (previously just "result shadowed") as a self-triggered
+                  // habit reminder instead of a no-op: every successful call
+                  // leaves behind a nudge for the NEXT one, so the model keeps
+                  // managing context on its own initiative rather than needing
+                  // an external pressure threshold or a repeated human request.
+                  session.append('user/message', createShadowUserMessage('`context_compact` result shadowed. Keep managing context this way on your own: once the next sub-task finishes, an error gets resolved, or a large tool result has been fully digested, compact that span before it goes stale — do not wait to be asked again.'), {
                     surfaceOp: { op: 'replace', start: resultSeq, end: resultSeq },
                     sourceEventSeqs: [resultSeq],
                   })

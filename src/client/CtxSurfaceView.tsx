@@ -26,6 +26,15 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
   const [refreshTick, setRefreshTick] = React.useState(0)
   const [detailsWidth, setDetailsWidth] = React.useState(DEFAULT_DETAILS_WIDTH)
   const resizeStartRef = React.useRef<{ startX: number; startWidth: number } | null>(null)
+  // Clicking a timeline span above only ever changed detailIdx/highlight
+  // state; nothing scrolled the ledger table underneath so the newly
+  // selected row could sit off-screen with no visual link back to the
+  // span the user just clicked. rowElRefs holds every currently-rendered
+  // <tr> (both real rows and folded summary rows) keyed by the same DOM
+  // key domKeyOf resolves a row's globalIdx to, so the effect below can
+  // find and scroll to whichever element actually represents the newly
+  // selected row — even one hidden inside a collapsed Turns/Calls run.
+  const rowElRefs = React.useRef<Map<string, HTMLTableRowElement>>(new Map())
 
   // View-bar state: the Duration/Turns/Calls-equivalent row rendered under
   // the main toolbar (see styles.ts's cxpViewBar). `actualWidth` mirrors
@@ -133,14 +142,20 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
 
   // Fold consecutive rows into one summary line when Turns/Calls collapse
   // is on — a run the user already expanded (expandGroup) stays inline.
-  const displayItems = React.useMemo<DisplayItem[]>(() => {
+  // domKeyOf maps EVERY filtered row's globalIdx (visible or folded) to
+  // the dom-ref key of whichever <tr> currently represents it, so the
+  // scroll-sync effect below can resolve a click on any row — including
+  // one hidden inside a collapsed summary — to a real element on screen.
+  const { displayItems, domKeyOf } = React.useMemo<{ displayItems: DisplayItem[]; domKeyOf: Map<number, string> }>(() => {
     const items: DisplayItem[] = []
+    const domKeyOf = new Map<number, string>()
     let i = 0
     while (i < filtered.length) {
       const row = filtered[i]
       const globalIdx = rows.indexOf(row)
       if (turnsCollapsed && isTurnStart(row)) {
         items.push({ kind: 'row', globalIdx, row })
+        domKeyOf.set(globalIdx, 'row-' + globalIdx)
         i += 1
         const key = 'turn-' + globalIdx
         const runStart = i
@@ -150,10 +165,13 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
           if (expandedKeys.has(key)) {
             for (let j = runStart; j < runStart + count; j += 1) {
               const r = filtered[j]
-              items.push({ kind: 'row', globalIdx: rows.indexOf(r), row: r })
+              const gIdx = rows.indexOf(r)
+              items.push({ kind: 'row', globalIdx: gIdx, row: r })
+              domKeyOf.set(gIdx, 'row-' + gIdx)
             }
           } else {
             items.push({ kind: 'summary', key, count })
+            for (let j = runStart; j < runStart + count; j += 1) domKeyOf.set(rows.indexOf(filtered[j]), key)
           }
         }
         continue
@@ -166,18 +184,38 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
         if (expandedKeys.has(key)) {
           for (let j = runStart; j < runStart + count; j += 1) {
             const r = filtered[j]
-            items.push({ kind: 'row', globalIdx: rows.indexOf(r), row: r })
+            const gIdx = rows.indexOf(r)
+            items.push({ kind: 'row', globalIdx: gIdx, row: r })
+            domKeyOf.set(gIdx, 'row-' + gIdx)
           }
         } else {
           items.push({ kind: 'summary', key, count })
+          for (let j = runStart; j < runStart + count; j += 1) domKeyOf.set(rows.indexOf(filtered[j]), key)
         }
         continue
       }
       items.push({ kind: 'row', globalIdx, row })
+      domKeyOf.set(globalIdx, 'row-' + globalIdx)
       i += 1
     }
-    return items
+    return { displayItems: items, domKeyOf }
   }, [filtered, rows, turnsCollapsed, callsCollapsed, expandedKeys])
+
+  // Scroll the ledger's own scroller (cxpTablePane, not the page) to
+  // whichever <tr> now represents detailIdx — fires for every selection
+  // source (timeline span click, table row click, future callers alike)
+  // since handleSelect always funnels through setDetailIdx. behavior/block
+  // match the shipped trajectory panel's own record-jump effect byte for
+  // byte (dsh-client-ui-trajectory/lib/client.js's openRecordSummary/
+  // pendingScrollRecordId effect: `row.scrollIntoView({behavior:"smooth",
+  // block:"center"})`) instead of an instant 'nearest' jump.
+  React.useEffect(() => {
+    if (detailIdx === null) return
+    const key = domKeyOf.get(detailIdx)
+    if (!key) return
+    const el = rowElRefs.current.get(key)
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, [detailIdx, domKeyOf])
 
   const onResizePointerDown = React.useCallback((event: React.PointerEvent) => {
     resizeStartRef.current = { startX: event.clientX, startWidth: detailsWidth }
@@ -305,6 +343,10 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
                           return React.createElement('tr', {
                             key: item.key,
                             className: 'cxpSummaryRow',
+                            ref: (el: HTMLTableRowElement | null) => {
+                              if (el) rowElRefs.current.set(item.key, el)
+                              else rowElRefs.current.delete(item.key)
+                            },
                             onClick: () => expandGroup(item.key),
                             title: '点击展开',
                           },
@@ -319,6 +361,11 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
                         return React.createElement('tr', {
                           key: row.seq,
                           className: 'cxpTblRow',
+                          ref: (el: HTMLTableRowElement | null) => {
+                            const key = 'row-' + globalIdx
+                            if (el) rowElRefs.current.set(key, el)
+                            else rowElRefs.current.delete(key)
+                          },
                           'data-selected': isStart || isEnd || inSpan || globalIdx === detailIdx,
                           onClick: () => handleSelect(globalIdx),
                         },
