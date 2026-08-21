@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { JsonTree } from './JsonTree.js'
+import { rowKind, rowLabel } from './surface-utils.js'
 import type { CtxSurfaceRow } from './types.js'
 
 type Tab = 'summary' | 'content' | 'raw'
@@ -48,6 +49,7 @@ export function DetailPanel(props: {
     React.createElement('div', { className: 'cxpDetailsHeader' },
       React.createElement('div', { className: 'cxpDetailsTitle' },
         React.createElement('span', { className: 'cxpDetailsTitleSeq' }, 'seq ' + row.seq),
+        React.createElement('span', { className: 'cxpKindTag', 'data-kind': rowKind(row), title: row.type }, rowLabel(row)),
         React.createElement('span', { className: 'cxpDetailsTitleKind' }, row.type),
       ),
       React.createElement('button', { className: 'cxpClose', onClick: onClose, 'aria-label': '关闭详情' }, '×'),

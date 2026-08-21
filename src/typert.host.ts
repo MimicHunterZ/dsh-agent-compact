@@ -10,6 +10,18 @@
 // mismatch only surfacing later as a live "business result failed boundary
 // validation" RPC error (see ctx-surface.ts's history comment for the
 // incident this is guarding against).
+//
+// CAVEAT the Equal<> check below does NOT catch: adding a new *optional*
+// field to CtxSurfaceRow without adding it here. `{a,b}` and `{a,b,c?:X}`
+// satisfy `Equal` in both directions (an object missing an optional prop
+// still structurally matches it), so `tsc` stays green — but z.object()
+// silently STRIPS any key the schema doesn't declare, so the field still
+// vanishes on the wire at runtime with zero compile-time signal. Hit this
+// exact way once already (added `source` to CtxSurfaceRow, forgot it here
+// and in typert.remote-client.ts — every row silently came back
+// `source:undefined` client-side, no error anywhere). Any new OPTIONAL
+// field must be added to row$schema by hand in both this file and
+// typert.remote-client.ts; only required-field drift is caught for free.
 import { z } from 'zod'
 import type { CtxSurfaceBlock, CtxSurfaceReadRequest, CtxSurfaceReadResult, CtxSurfaceRow } from './ctx-surface.js'
 
@@ -37,6 +49,7 @@ const row$schema = z.object({
   text: z.string().readonly(),
   chars: z.number().readonly(),
   blocks: z.array(block$schema).readonly(),
+  source: z.string().readonly().optional(),
 })
 assertEqual<z.infer<typeof row$schema>, CtxSurfaceRow>(true)
 
@@ -101,7 +114,7 @@ export const TYPERT = {
           },
           {
             name: 'CtxSurfaceRow',
-            declaration: "export interface CtxSurfaceRow {\n    readonly seq: number;\n    readonly type: string;\n    readonly text: string;\n    readonly chars: number;\n    readonly blocks: readonly CtxSurfaceBlock[];\n}",
+            declaration: "export interface CtxSurfaceRow {\n    readonly seq: number;\n    readonly type: string;\n    readonly text: string;\n    readonly chars: number;\n    readonly blocks: readonly CtxSurfaceBlock[];\n    readonly source?: string;\n}",
           },
           {
             name: 'CtxSurfaceReadRequest',

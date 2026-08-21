@@ -3,6 +3,51 @@ export const CSS_TAG = '@mimichunterz/agent-compact/ctx-surface.css'
 // cxp = "ctx panel" v2 (replaces the old cx1-prefixed hand-copy). Values
 // reference the same --dsw-* design tokens the shipped trajectory panel
 // uses (verified against its real compiled CSS), not hard-coded colors.
+//
+// Bottom clearance: --dsh-trajectory-bottom-clearance is NOT a global
+// variable — the shipped trajectory panel only *defines* it locally on its
+// own ledger element (scoped to that subtree), derived from the truly
+// shared --dsh-composer-height (set on a shared scroller ancestor by the
+// conversation composer via ResizeObserver). Our own cxpLedger sits in a
+// separate DOM subtree, so referencing --dsh-trajectory-bottom-clearance
+// without defining it here always fell back to the CSS default (0px): no
+// space was ever reserved for the floating composer overlay, so the last
+// rows sat underneath it and the pane could never actually scroll to the
+// true bottom. Define the same derived value locally, exactly like
+// trajectory's own ledger does, so cxpTablePane's padding-bottom resolves
+// to a real pixel value instead of silently falling back to 0.
+//
+// Timeline/tag colors: matched byte-for-byte against trajectory's real
+// compiled formulas (dsh-client-ui-trajectory/lib/client.js) instead of the
+// earlier approximations — user=business-primary (unchanged), tool=warn
+// label (unchanged), message now uses the exact
+// `--trajectory-assistant-decoding-color` mix (brand 60% + error-secondary,
+// not the old brand 62% + label-secondary approximation, which read too
+// blue/flat next to trajectory's more violet assistant color), and a new
+// `context` kind (green, state-success-primary 68% + label-secondary) was
+// added for `user/message` rows whose `source.kind !== 'user'` — see
+// surface-utils.ts's rowKind() and ../ctx-surface.ts's `source` field.
+//
+// cxpViewBar/cxpViewToggle/cxpViewAction mirror trajectory's own
+// TrajectoryToolbar.module.css (.fV0t5q_*) pill/toggle look for the
+// Duration/Turns/Calls-equivalent row CtxSurfaceView renders under the main
+// toolbar (kept, not replaced: 刷新/清除选择/压缩此区间/search stay in
+// .cxpToolbar; the new row is purely additive).
+//
+// cxpKindCell: trajectory's own kind slot is right-aligned
+// (`.Y0dWHa_kindSlot{justify-content:flex-end}`) — its badges hug the right
+// edge of the narrow kind column instead of hugging the left edge like the
+// seq column next to it. Match that instead of the browser's default
+// left-aligned <td>.
+//
+// cxpColKind width: first set to 66px to fit the new short badges (see
+// rowLabel), but that forgot the <td>'s own `padding:0 8px` (16px eaten
+// before the badge even starts) — 'ASSISTANT' (widest label) then clipped
+// its last letter with no ellipsis (text-overflow only applies to a text
+// node directly inside the overflow box, not a nested <span>, so it just
+// silently cuts pixels). 84px leaves ~68px for the badge itself, comfortably
+// fitting 'ASSISTANT' at this font-size. letter-spacing bumped .02em ->
+// .035em to match trajectory's own `.Y0dWHa_kindTag` value exactly too.
 export const CSS = `
 .cxpRoot{--dsh-trajectory-toolbar-height:34px;box-sizing:border-box;width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;display:flex;overflow:hidden}
 .cxpToolbar{box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2);flex:none;align-items:center;gap:6px;height:var(--dsh-trajectory-toolbar-height);padding:0 10px;display:flex}
@@ -13,6 +58,13 @@ export const CSS = `
 .cxpToolbarBtn:disabled{opacity:.4;cursor:default;background:var(--dsw-alias-bg-module-platform)}
 .cxpToolbarStats{color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xxs-12);white-space:nowrap;margin-left:6px}
 .cxpToolbarSearch{margin-left:auto;background:var(--dsw-alias-bg-module-platform);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);height:24px;padding:0 8px;width:180px}
+.cxpViewBar{box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);flex:none;align-items:center;gap:2px;height:26px;padding:0 6px;display:flex}
+.cxpViewToggle{height:20px;color:var(--dsw-alias-label-tertiary);cursor:pointer;font:var(--dsw-font-xxs-12);background:0 0;border:0;border-radius:3px;flex:none;align-items:center;gap:4px;padding:0 7px;display:inline-flex}
+.cxpViewToggle:hover,.cxpViewToggle[aria-pressed=true]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.cxpViewToggleIcon{stroke:currentColor;stroke-width:1.25px;stroke-linecap:round;stroke-linejoin:round;flex:none;width:12px;height:12px}
+.cxpViewAction{height:20px;color:var(--dsw-alias-label-tertiary);cursor:pointer;font:var(--dsw-font-xxs-12);background:0 0;border:0;border-radius:3px;flex:none;align-items:center;gap:4px;padding:0 5px;display:inline-flex}
+.cxpViewAction:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.cxpViewActionIcon{color:var(--dsw-alias-label-tertiary);font:14px/14px var(--ds-font-family-code)}
 .cxpTimeline{box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);grid-template-columns:40px minmax(0,1fr);height:50px;display:grid;flex:none;overflow:hidden}
 .cxpTlLabels{border-right:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-caption);font:9px/1 var(--dsw-font-family);position:relative}
 .cxpTlLabels span{text-align:right;justify-content:flex-end;align-items:center;height:12px;display:flex;position:absolute;right:4px}
@@ -23,24 +75,31 @@ export const CSS = `
 .cxpTlSpan{position:absolute;height:10px;border-radius:1.5px;cursor:pointer;opacity:.88;transition:opacity .1s}
 .cxpTlSpan:hover{opacity:1;box-shadow:0 0 0 1px var(--dsw-alias-bg-layer-2),0 0 0 2px color-mix(in srgb,var(--dsw-alias-state-business-primary) 70%,transparent)}
 .cxpTlSpan[data-timeline-span=user]{background:var(--dsw-alias-state-business-primary)}
-.cxpTlSpan[data-timeline-span=message]{background:color-mix(in srgb,var(--dsw-alias-brand-primary-new-colorprimary-new-color,var(--dsw-alias-state-business-primary)) 62%,var(--dsw-alias-label-secondary))}
+.cxpTlSpan[data-timeline-span=context]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 68%,var(--dsw-alias-label-secondary))}
+.cxpTlSpan[data-timeline-span=message]{background:color-mix(in srgb,var(--dsw-alias-brand-primary-new-colorprimary-new-color,var(--dsw-alias-state-business-primary)) 60%,var(--dsw-alias-state-error-secondary,var(--dsw-alias-label-secondary)))}
 .cxpTlSpan[data-timeline-span=tool]{background:var(--dsw-alias-state-warn-label)}
 .cxpTlSpan[data-selected=false]{opacity:.22}
 .cxpTlSpan[data-current=true]{opacity:1;box-shadow:0 0 0 1px var(--dsw-alias-bg-layer-2),0 0 0 2px var(--dsw-alias-state-business-primary)}
 .cxpTlTurnBoundary{position:absolute;top:0;bottom:0;width:1px;background:var(--dsw-alias-border-l1);pointer-events:none}
-.cxpLedger{flex:1;min-width:0;min-height:0;display:flex;position:relative;overflow:hidden;container-type:inline-size}
+.cxpLedger{flex:1;min-width:0;min-height:0;display:flex;position:relative;overflow:hidden;container-type:inline-size;--dsh-trajectory-bottom-clearance:calc(var(--dsh-composer-height,152px) + 16px)}
 .cxpTablePane{min-width:0;flex:1;position:relative;overflow:hidden auto;padding-bottom:var(--dsh-trajectory-bottom-clearance,0px)}
 .cxpTbl{border-spacing:0;table-layout:fixed;width:100%;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);font:var(--dsw-font-xxs-12)}
 .cxpTbl col.cxpColSeq{width:52px}
-.cxpTbl col.cxpColKind{width:96px}
+.cxpTbl col.cxpColKind{width:84px}
+.cxpKindCell{text-align:right}
 .cxpTbl td{box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l1);height:28px;padding:0 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
 .cxpTblRow{cursor:pointer}
 .cxpTblRow:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .cxpTblRow[data-selected=true]{background:var(--dsw-alias-interactive-bg-active)}
+.cxpSummaryRow{cursor:pointer}
+.cxpSummaryRow:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.cxpSummaryRow td{height:22px;color:var(--dsw-alias-label-tertiary)}
+.cxpSummaryEllipsis{color:var(--dsw-alias-label-caption);font-weight:600;margin-right:6px}
 .cxpSeq{color:var(--dsw-alias-label-caption);font:11px/16px var(--ds-font-family-code)}
-.cxpKindTag{box-sizing:border-box;letter-spacing:.02em;border-radius:4px;font-size:10px;font-weight:650;line-height:16px;padding:0 5px;display:inline-flex}
+.cxpKindTag{box-sizing:border-box;letter-spacing:.035em;border-radius:4px;font-size:10px;font-weight:650;line-height:16px;padding:0 5px;display:inline-flex}
 .cxpKindTag[data-kind=user]{color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-state-business-tertiary)}
-.cxpKindTag[data-kind=message]{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-module-platform)}
+.cxpKindTag[data-kind=context]{color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 68%,var(--dsw-alias-label-secondary));background:var(--dsw-alias-state-success-tertiary)}
+.cxpKindTag[data-kind=message]{color:color-mix(in srgb,var(--dsw-alias-brand-primary-new-colorprimary-new-color,var(--dsw-alias-state-business-primary)) 60%,var(--dsw-alias-state-error-secondary,var(--dsw-alias-label-secondary)));background:color-mix(in srgb,color-mix(in srgb,var(--dsw-alias-brand-primary-new-colorprimary-new-color,var(--dsw-alias-state-business-primary)) 55%,var(--dsw-alias-state-error-secondary,var(--dsw-alias-label-secondary))) 15%,var(--dsw-alias-bg-layer-1))}
 .cxpKindTag[data-kind=tool]{color:var(--dsw-alias-state-warn-label);background:var(--dsw-alias-state-warn-tertiary)}
 .cxpSpanBadge{color:var(--dsw-alias-state-business-primary);font:600 10px/16px var(--dsw-font-family);margin-right:4px}
 .cxpContent{color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code);font-size:12px}

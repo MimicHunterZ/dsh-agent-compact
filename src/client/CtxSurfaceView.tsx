@@ -1,11 +1,18 @@
 import * as React from 'react'
 import { DetailPanel } from './DetailPanel.js'
-import { compressPrompt, isToolRow, laneOf, rowKind, rowPreview } from './surface-utils.js'
+import { compressPrompt, isToolRow, isTurnStart, laneOf, rowKind, rowLabel, rowPreview } from './surface-utils.js'
 import type { CtxSurfaceRow, CtxSurfaceViewProps } from './types.js'
 
 const EMPTY_ROWS: readonly CtxSurfaceRow[] = []
 const DEFAULT_DETAILS_WIDTH = 380
 const MIN_DETAILS_WIDTH = 320
+
+// Table rows after the Turns/Calls fold is applied: either a real surface
+// row, or one synthetic summary row standing in for a run of hidden rows
+// (clicking it expands just that run — see expandGroup below).
+type DisplayItem =
+  | { readonly kind: 'row'; readonly globalIdx: number; readonly row: CtxSurfaceRow }
+  | { readonly kind: 'summary'; readonly key: string; readonly count: number }
 
 export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
   const { sessionId, readSurface, inputActions } = props
@@ -19,6 +26,16 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
   const [refreshTick, setRefreshTick] = React.useState(0)
   const [detailsWidth, setDetailsWidth] = React.useState(DEFAULT_DETAILS_WIDTH)
   const resizeStartRef = React.useRef<{ startX: number; startWidth: number } | null>(null)
+
+  // View-bar state: the Duration/Turns/Calls-equivalent row rendered under
+  // the main toolbar (see styles.ts's cxpViewBar). `actualWidth` mirrors
+  // trajectory's own duration toggle semantics (default = equal-width,
+  // toggle on = proportional sizing) but proportions by `chars` instead of
+  // wall-clock duration, since CtxSurfaceRow carries no timestamp.
+  const [actualWidth, setActualWidth] = React.useState(false)
+  const [turnsCollapsed, setTurnsCollapsed] = React.useState(false)
+  const [callsCollapsed, setCallsCollapsed] = React.useState(false)
+  const [expandedKeys, setExpandedKeys] = React.useState<ReadonlySet<string>>(new Set())
 
   const load = React.useCallback(() => {
     if (!sessionId || !readSurface) {
@@ -63,6 +80,24 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
 
   const clearSelection = React.useCallback(() => { setStartIdx(null); setEndIdx(null) }, [])
 
+  const toggleTurns = React.useCallback(() => {
+    setTurnsCollapsed((v) => !v)
+    setExpandedKeys(new Set())
+  }, [])
+
+  const toggleCalls = React.useCallback(() => {
+    setCallsCollapsed((v) => !v)
+    setExpandedKeys(new Set())
+  }, [])
+
+  const expandGroup = React.useCallback((key: string) => {
+    setExpandedKeys((prev) => {
+      const next = new Set(prev)
+      next.add(key)
+      return next
+    })
+  }, [])
+
   const filtered = React.useMemo(() => {
     if (!searchQuery.trim()) return rows
     const q = searchQuery.toLowerCase()
@@ -75,9 +110,10 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
   const tlWidths = React.useMemo(() => {
     const n = filtered.length
     if (n === 0) return []
+    if (!actualWidth) return filtered.map(() => 100 / n)
     const total = filtered.reduce((a, r) => a + Math.max(1, r.chars), 0)
     return filtered.map((r) => Math.max(1, (r.chars * 100) / total))
-  }, [filtered])
+  }, [filtered, actualWidth])
 
   let tlLeft = 0
   const tlSpans = filtered.map((row, i) => {
@@ -88,6 +124,60 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
     tlLeft += width
     return item
   })
+
+  // Turn-boundary tick marks in the timeline (see styles.ts's
+  // cxpTlTurnBoundary, defined but unused before this pass): one vertical
+  // line at the left edge of every turn after the first, mirroring
+  // trajectory's own `:not(:first-child)` boundary rule.
+  const turnBoundaries = tlSpans.filter((s, i) => i > 0 && isTurnStart(s.row)).map((s) => s.left)
+
+  // Fold consecutive rows into one summary line when Turns/Calls collapse
+  // is on — a run the user already expanded (expandGroup) stays inline.
+  const displayItems = React.useMemo<DisplayItem[]>(() => {
+    const items: DisplayItem[] = []
+    let i = 0
+    while (i < filtered.length) {
+      const row = filtered[i]
+      const globalIdx = rows.indexOf(row)
+      if (turnsCollapsed && isTurnStart(row)) {
+        items.push({ kind: 'row', globalIdx, row })
+        i += 1
+        const key = 'turn-' + globalIdx
+        const runStart = i
+        let count = 0
+        while (i < filtered.length && !isTurnStart(filtered[i])) { i += 1; count += 1 }
+        if (count > 0) {
+          if (expandedKeys.has(key)) {
+            for (let j = runStart; j < runStart + count; j += 1) {
+              const r = filtered[j]
+              items.push({ kind: 'row', globalIdx: rows.indexOf(r), row: r })
+            }
+          } else {
+            items.push({ kind: 'summary', key, count })
+          }
+        }
+        continue
+      }
+      if (!turnsCollapsed && callsCollapsed && isToolRow(row)) {
+        const key = 'calls-' + globalIdx
+        const runStart = i
+        let count = 0
+        while (i < filtered.length && isToolRow(filtered[i])) { i += 1; count += 1 }
+        if (expandedKeys.has(key)) {
+          for (let j = runStart; j < runStart + count; j += 1) {
+            const r = filtered[j]
+            items.push({ kind: 'row', globalIdx: rows.indexOf(r), row: r })
+          }
+        } else {
+          items.push({ kind: 'summary', key, count })
+        }
+        continue
+      }
+      items.push({ kind: 'row', globalIdx, row })
+      i += 1
+    }
+    return items
+  }, [filtered, rows, turnsCollapsed, callsCollapsed, expandedKeys])
 
   const onResizePointerDown = React.useCallback((event: React.PointerEvent) => {
     resizeStartRef.current = { startX: event.clientX, startWidth: detailsWidth }
@@ -131,6 +221,46 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
         onChange: (e: React.ChangeEvent<HTMLInputElement>) => setSearchQuery(e.target.value),
       }),
     ),
+    React.createElement('div', { className: 'cxpViewBar', role: 'toolbar', 'aria-label': '视图选项' },
+      React.createElement('button', {
+        type: 'button',
+        className: 'cxpViewToggle',
+        'aria-pressed': actualWidth,
+        title: actualWidth ? '切换为等宽显示' : '切换为按字符数宽度显示',
+        onClick: () => setActualWidth((v) => !v),
+      },
+        React.createElement('svg', {
+          className: 'cxpViewToggleIcon',
+          viewBox: '0 0 16 16',
+          fill: 'none',
+          'aria-hidden': 'true',
+        },
+          React.createElement('circle', { cx: '8', cy: '8', r: '5.25' }),
+          React.createElement('path', { d: 'M8 4.75V8l2.25 1.5' }),
+        ),
+        'Duration',
+      ),
+      React.createElement('button', {
+        type: 'button',
+        className: 'cxpViewAction',
+        'aria-pressed': turnsCollapsed,
+        title: turnsCollapsed ? '展开全部输入轮次' : '折叠全部输入轮次',
+        onClick: toggleTurns,
+      },
+        React.createElement('span', { className: 'cxpViewActionIcon', 'aria-hidden': 'true' }, turnsCollapsed ? '⊞' : '⊟'),
+        'Turns',
+      ),
+      React.createElement('button', {
+        type: 'button',
+        className: 'cxpViewAction',
+        'aria-pressed': callsCollapsed,
+        title: callsCollapsed ? '展开全部工具调用' : '折叠全部工具调用',
+        onClick: toggleCalls,
+      },
+        React.createElement('span', { className: 'cxpViewActionIcon', 'aria-hidden': 'true' }, callsCollapsed ? '⊞' : '⊟'),
+        'Calls',
+      ),
+    ),
     React.createElement('div', { className: 'cxpTimeline' },
       React.createElement('div', { className: 'cxpTlLabels' },
         React.createElement('span', null, '输入'),
@@ -141,12 +271,17 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
         tlSpans.map((s) => React.createElement('div', {
           key: s.globalIdx,
           className: 'cxpTlSpan',
-          'data-timeline-span': rowKind(s.row.type),
+          'data-timeline-span': rowKind(s.row),
           'data-selected': span === null ? true : s.selected,
           'data-current': s.globalIdx === startIdx || s.globalIdx === endIdx,
           style: { left: s.left + '%', width: 'max(2px, ' + s.width + '%)', top: 5 + laneOf(s.row) * 14 + 'px' },
           onClick: () => handleSelect(s.globalIdx),
           title: rowPreview(s.row),
+        })),
+        turnBoundaries.map((left, i) => React.createElement('div', {
+          key: 'boundary-' + i,
+          className: 'cxpTlTurnBoundary',
+          style: { left: left + '%' },
         })),
       ),
     ),
@@ -165,8 +300,19 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
                 React.createElement('tbody', null,
                   filtered.length === 0
                     ? React.createElement('tr', null, React.createElement('td', { colSpan: 3, className: 'cxpEmpty' }, rows.length === 0 ? '暂无 surface 消息' : '无匹配结果'))
-                    : filtered.map((row) => {
-                        const globalIdx = rows.indexOf(row)
+                    : displayItems.map((item) => {
+                        if (item.kind === 'summary') {
+                          return React.createElement('tr', {
+                            key: item.key,
+                            className: 'cxpSummaryRow',
+                            onClick: () => expandGroup(item.key),
+                            title: '点击展开',
+                          },
+                            React.createElement('td', { colSpan: 3 },
+                              React.createElement('span', { className: 'cxpSummaryEllipsis' }, '⋯'),
+                              '已折叠 ' + item.count + ' 条'))
+                        }
+                        const { globalIdx, row } = item
                         const isStart = globalIdx === startIdx
                         const isEnd = globalIdx === endIdx
                         const inSpan = span !== null && globalIdx >= span.lo && globalIdx <= span.hi
@@ -177,10 +323,10 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
                           onClick: () => handleSelect(globalIdx),
                         },
                           React.createElement('td', { className: 'cxpSeq' }, row.seq),
-                          React.createElement('td', null,
+                          React.createElement('td', { className: 'cxpKindCell' },
                             (isStart ? React.createElement('span', { className: 'cxpSpanBadge' }, '起点') : null),
                             (isEnd ? React.createElement('span', { className: 'cxpSpanBadge' }, '终点') : null),
-                            React.createElement('span', { className: 'cxpKindTag', 'data-kind': rowKind(row.type) }, row.type)),
+                            React.createElement('span', { className: 'cxpKindTag', 'data-kind': rowKind(row), title: row.type }, rowLabel(row))),
                           React.createElement('td', { className: 'cxpContent' }, rowPreview(row)),
                         )
                       }),

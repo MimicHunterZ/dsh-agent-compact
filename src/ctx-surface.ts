@@ -25,6 +25,15 @@ export interface CtxSurfaceRow {
   readonly text: string
   readonly chars: number
   readonly blocks: readonly CtxSurfaceBlock[]
+  // Raw `data.source.kind` off a `user/message` event (undefined for every
+  // other row type). The shipped trajectory panel uses this exact field
+  // (see its trajectory-message-definitions.js: `event.data.source.kind !==
+  // "user"`) to tell a real user turn apart from a same-shaped but
+  // synthetically-injected "context" row (plugin/system reminder, session
+  // recall, skill invocation, etc: anything in MessageSourceMap other than
+  // `{kind:'user'}`). Mirrored so the client can color/group rows the same
+  // way trajectory does instead of treating every `user/message` row alike.
+  readonly source?: string
 }
 
 export interface CtxSurfaceReadRequest {
@@ -54,6 +63,7 @@ interface SurfaceNodeLike {
 interface SurfaceNodeData {
   message?: { content?: unknown } | null
   content?: unknown
+  source?: { kind?: unknown } | null
 }
 
 interface SessionQueryLike {
@@ -147,6 +157,16 @@ function kindOf(b: unknown): CtxSurfaceBlock['kind'] {
   }
 }
 
+// Only `user/message` events carry a `data.source` (see MessageSourceMap:
+// user/plugin/model/tool/goal/session-reference); every other row type
+// returns undefined and is left off the wire row entirely.
+function sourceKindOf(n: SurfaceNodeLike): string | undefined {
+  if (n.type !== 'user/message') return undefined
+  const d = (n.data as SurfaceNodeData | undefined) ?? null
+  const kind = d && d.source && typeof d.source === 'object' ? (d.source as { kind?: unknown }).kind : undefined
+  return typeof kind === 'string' ? kind : undefined
+}
+
 function blockLabel(b: unknown): string | undefined {
   const blk = b as AnyBlock
   if (blk.type === 'tool-call' || blk.type === 'tool-result') {
@@ -179,12 +199,14 @@ function rowOf(n: SurfaceNodeLike): CtxSurfaceRow | null {
     }
   }
   const flat = blocksText(content, 0, true, TEXT_MAX)
+  const source = sourceKindOf(n)
   return {
     seq,
     type,
     text: flat.text.replace(/\n+$/, ''),
     chars: flat.chars,
     blocks,
+    ...(source !== undefined ? { source } : {}),
   }
 }
 

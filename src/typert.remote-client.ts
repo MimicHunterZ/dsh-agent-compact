@@ -5,7 +5,9 @@
 //
 // Real TypeScript source compiled by `tsc`, type-checked against
 // ctx-surface.ts the same way as typert.host.ts — see that file's header
-// for why this matters.
+// for why this matters, INCLUDING the optional-field blind spot: a new
+// optional CtxSurfaceRow field must be added to row$schema by hand here
+// too, or it silently vanishes on the wire with no compile error.
 import { z } from 'zod'
 import type { CtxSurfaceBlock, CtxSurfaceReadRequest, CtxSurfaceReadResult, CtxSurfaceRow } from './ctx-surface.js'
 
@@ -31,6 +33,7 @@ const row$schema = z.object({
   text: z.string().readonly(),
   chars: z.number().readonly(),
   blocks: z.array(block$schema).readonly(),
+  source: z.string().readonly().optional(),
 })
 assertEqual<z.infer<typeof row$schema>, CtxSurfaceRow>(true)
 

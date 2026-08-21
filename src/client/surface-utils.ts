@@ -12,9 +12,14 @@ export function isToolCallOnly(row: CtxSurfaceRow): boolean {
   return row.type === 'assistant/message' && row.blocks.length > 0 && row.blocks.every((b) => b.kind === 'tool-call')
 }
 
-export function rowKind(type: string): 'user' | 'message' | 'tool' {
-  if (type === 'user/message') return 'user'
-  if (type === 'tool/result') return 'tool'
+// Mirrors the shipped trajectory panel's own kind classification (see its
+// trajectory-message-definitions.js): a `user/message` row whose recorded
+// `source.kind` is anything other than `'user'` (plugin/system reminder,
+// session recall, skill invocation, ...) is a synthetic "context" row, not
+// a real user turn — same distinction trajectory colors green vs blue.
+export function rowKind(row: CtxSurfaceRow): 'user' | 'context' | 'message' | 'tool' {
+  if (row.type === 'tool/result') return 'tool'
+  if (row.type === 'user/message') return row.source !== undefined && row.source !== 'user' ? 'context' : 'user'
   return 'message'
 }
 
@@ -23,6 +28,33 @@ export function laneOf(row: CtxSurfaceRow): number {
   if (row.type === 'tool/result') return 2
   if (row.type === 'assistant/message') return 1
   return 0
+}
+
+// A new "turn" starts at every real or synthetic input row (rowKind user or
+// context) — our flat surface has no server-side turn number the way
+// trajectory's own event-log analysis does, so grouping for the Turns
+// toggle is derived purely from this boundary.
+export function isTurnStart(row: CtxSurfaceRow): boolean {
+  const k = rowKind(row)
+  return k === 'user' || k === 'context'
+}
+
+// Short badge text for the kind tag — mirrors trajectory's own table
+// (USER/ASSISTANT/TOOL/CONTEXT), instead of the raw `user/message` /
+// `assistant/message` / `tool/result` wire type string, which is long
+// enough to force the whole 类型 column wide and crowd out the content
+// preview column. The full wire type stays available as the tag's title
+// attribute (see CtxSurfaceView.tsx) so nothing is lost, just not shown by
+// default.
+const KIND_LABEL: Record<ReturnType<typeof rowKind>, string> = {
+  user: 'USER',
+  context: 'CONTEXT',
+  message: 'ASSISTANT',
+  tool: 'TOOL',
+}
+
+export function rowLabel(row: CtxSurfaceRow): string {
+  return KIND_LABEL[rowKind(row)]
 }
 
 export function rowPreview(row: CtxSurfaceRow): string {

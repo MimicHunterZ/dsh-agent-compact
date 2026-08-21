@@ -16,6 +16,12 @@ export interface CtxSurfaceRow {
   readonly text: string
   readonly chars: number
   readonly blocks: readonly CtxSurfaceBlock[]
+  // Mirrors ../ctx-surface.ts's CtxSurfaceRow.source: raw `data.source.kind`
+  // off a `user/message` event, undefined for every other row type. Used to
+  // tell a real user turn (source.kind === 'user') apart from a
+  // synthetically-injected "context" row, exactly like the shipped
+  // trajectory panel does.
+  readonly source?: string
 }
 
 export interface InputActions {
