@@ -63,7 +63,15 @@ export function rowPreview(row: CtxSurfaceRow): string {
     if (call && call.label) return call.label
   }
   for (const b of row.blocks) if (b.kind === 'tool-call') return b.text.slice(0, 40)
-  return row.text.slice(0, 120) || '(空)'
+  if (row.text.slice(0, 120)) return row.text.slice(0, 120)
+  // row.text deliberately drops image markers now (see ctx-surface.ts's
+  // blockText dropImages — keeps compressPrompt's anchors matching
+  // index.ts's own image-free anchor text), so an image-only row with no
+  // caption would otherwise show '(空)' with no hint an image is there;
+  // row.blocks still carries the untouched per-block entries, so fall back
+  // to that before giving up.
+  if (row.blocks.some((b) => b.kind === 'image')) return '[图片]'
+  return '(空)'
 }
 
 const MIN_ANCHOR_LEN = 10

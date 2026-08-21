@@ -64,7 +64,7 @@ Pass through the inserted row in the profile's `cordis.patch.yml` or a bundle pa
 
 ## Compatibility
 
-- Built and verified against DeepSeek Harness `0.1.0-rc.6` (`@deepseek-ai/dsh-compaction-basic@0.1.0-rc.6`).
+- Built and verified against DeepSeek Harness `0.1.0-rc.8` (`@deepseek-ai/dsh-compaction-basic@0.1.0-rc.8`).
 - Only **one compaction per session at a time** (the engine transaction is serialized); anchors re-resolve on every call, so later compactions never go stale after earlier checkpoints replaced old nodes.
 - With a local spill backend the root is fixed; other backends degrade gracefully (no `root` field → in-memory counter), and compaction itself is unaffected.
 

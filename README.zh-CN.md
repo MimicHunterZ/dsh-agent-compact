@@ -64,7 +64,7 @@ dsh plugin --profile web remove @mimichunterz/agent-compact
 
 ## 兼容性
 
-- 针对 DeepSeek Harness `0.1.0-rc.6`(`@deepseek-ai/dsh-compaction-basic@0.1.0-rc.6`)构建与验证。
+- 针对 DeepSeek Harness `0.1.0-rc.8`(`@deepseek-ai/dsh-compaction-basic@0.1.0-rc.8`)构建与验证。
 - 每个会话**同一时刻只允许一次压缩**(引擎事务串行);锚点每次重新解析,重复压缩不会因之前的检查点而过期。
 - 本地 spill 后端固定 root;换用其他后端时归档功能按可用性降级(无 `root` 字段则回退内存计数),压缩本身不受影响。
 

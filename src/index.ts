@@ -173,10 +173,22 @@ export function apply(ctx: Context, config: Config) {
   // turns), so the model's view of a message starts at its visible text — not
   // at the reasoning the plugin would otherwise concatenate first. The archive
   // keeps the full raw text (skipReasoning = false).
+  //
+  // Images are skipped for the SAME reason when skipReasoning is true: an
+  // anchor is verbatim text the model composes by hand, and a message that
+  // opens with one or more images before its real text (`content` puts the
+  // image block(s) first) used to force every anchor to start with a literal
+  // "[image]\n[image]\n..." prefix the model had no way to know about —
+  // `startAnchor not found` even though the real text prefix matched
+  // perfectly starting right after the images. Only affects the
+  // ANCHOR-MATCHING view; the archived spill text (skipReasoning = false,
+  // see nodeText's only default-false call site below) still records
+  // "[image]" markers, so nothing is lost from the durable record.
   function blockText(b: unknown, depth: number, skipReasoning: boolean): string {
     if (depth > 5 || !b || typeof b !== 'object') return ''
     const blk = b as AnyBlock
     if (skipReasoning && blk.type === 'reasoning') return ''
+    if (skipReasoning && blk.type === 'image') return ''
     if (typeof blk.text === 'string') return blk.text
     if (blk.type === 'tool-call') {
       return '[tool-call ' + String(blk.name ?? '') + '] ' + (typeof blk.arguments === 'string' ? blk.arguments : '')

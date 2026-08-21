@@ -99,7 +99,19 @@ function nodeContent(n: SurfaceNodeLike): unknown {
 // anchor-matching text (DeepSeek moves reasoning to a separate wire field).
 // maxLen bounds concatenation so oversized tool results never blow up the
 // RPC payload; chars is a pure length count of the FULL block text.
-function blockText(b: unknown, depth: number, skipReasoning: boolean, maxLen: number): { text: string; chars: number } {
+//
+// dropImages is a SEPARATE knob from skipReasoning, used only when building
+// the row's flattened `text` (the source of compressPrompt's anchors — see
+// this file's module doc: "so a user-picked span in the panel maps 1:1 to
+// startAnchor/endAnchor resolution inside the tool"). index.ts's own
+// anchor-matching text now skips image blocks entirely (an anchor is
+// verbatim text the model types by hand; it cannot literally quote "[image]"
+// markers it never composed), so an anchor built from a row whose flattened
+// text still included "[image]" would no longer match there. dropImages
+// keeps the per-BLOCK entries in `row.blocks` unaffected (still `{kind:
+// 'image', ...}`, still rendered by DetailPanel) — it only strips the image
+// marker out of the flattened row.text used for the anchor itself.
+function blockText(b: unknown, depth: number, skipReasoning: boolean, maxLen: number, dropImages?: boolean): { text: string; chars: number } {
   if (depth > 5 || !b || typeof b !== 'object') return { text: '', chars: 0 }
   const blk = b as AnyBlock
   if (skipReasoning && blk.type === 'reasoning') return { text: '', chars: 0 }
@@ -111,25 +123,25 @@ function blockText(b: unknown, depth: number, skipReasoning: boolean, maxLen: nu
     return { text: truncate(raw, maxLen), chars: raw.length }
   }
   if (blk.type === 'tool-result') {
-    const inner = blocksText(blk.content, depth + 1, skipReasoning, maxLen)
+    const inner = blocksText(blk.content, depth + 1, skipReasoning, maxLen, dropImages)
     const raw = '[tool-result' + (blk.isError ? ' error' : '') + '] ' + inner.text
     return { text: truncate(raw, maxLen), chars: inner.chars + 1 }
   }
-  if (blk.type === 'image') return { text: '[image]', chars: 7 }
+  if (blk.type === 'image') return dropImages ? { text: '', chars: 0 } : { text: '[image]', chars: 7 }
   if (Array.isArray(blk.content)) {
-    const inner = blocksText(blk.content, depth + 1, skipReasoning, maxLen)
+    const inner = blocksText(blk.content, depth + 1, skipReasoning, maxLen, dropImages)
     return { text: inner.text, chars: inner.chars }
   }
   return { text: '', chars: 0 }
 }
 
-function blocksText(blocks: unknown, depth: number, skipReasoning: boolean, maxLen: number): { text: string; chars: number } {
+function blocksText(blocks: unknown, depth: number, skipReasoning: boolean, maxLen: number, dropImages?: boolean): { text: string; chars: number } {
   if (!Array.isArray(blocks)) return { text: '', chars: 0 }
   let out = ''
   let chars = 0
   let remain = maxLen
   for (const b of blocks) {
-    const part = blockText(b, depth, skipReasoning, remain)
+    const part = blockText(b, depth, skipReasoning, remain, dropImages)
     if (part.chars > 0) {
       chars += part.chars
       if (part.text.length > 0) {
@@ -198,7 +210,7 @@ function rowOf(n: SurfaceNodeLike): CtxSurfaceRow | null {
       remain = Math.max(0, TEXT_MAX - blocks.reduce((acc, blk) => acc + blk.text.length, 0))
     }
   }
-  const flat = blocksText(content, 0, true, TEXT_MAX)
+  const flat = blocksText(content, 0, true, TEXT_MAX, true)
   const source = sourceKindOf(n)
   return {
     seq,
