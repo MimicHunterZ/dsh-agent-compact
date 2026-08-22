@@ -305,13 +305,12 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
             ? React.createElement('div', { className: 'cxpErr' }, error)
             : React.createElement('table', { className: 'cxpTbl' },
                 React.createElement('colgroup', null,
-                  React.createElement('col', { className: 'cxpColSeq' }),
                   React.createElement('col', { className: 'cxpColKind' }),
                   React.createElement('col', null),
                 ),
                 React.createElement('tbody', null,
                   filtered.length === 0
-                    ? React.createElement('tr', null, React.createElement('td', { colSpan: 3, className: 'cxpEmpty' }, rows.length === 0 ? '暂无 surface 消息' : '无匹配结果'))
+                    ? React.createElement('tr', null, React.createElement('td', { colSpan: 2, className: 'cxpEmpty' }, rows.length === 0 ? '暂无 surface 消息' : '无匹配结果'))
                     : displayItems.map((item) => {
                         if (item.kind === 'summary') {
                           return React.createElement('tr', {
@@ -324,7 +323,7 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
                             onClick: () => expandGroup(item.key),
                             title: '点击展开',
                           },
-                            React.createElement('td', { colSpan: 3 },
+                            React.createElement('td', { colSpan: 2 },
                               React.createElement('span', { className: 'cxpSummaryEllipsis' }, '⋯'),
                               '已折叠 ' + item.count + ' 条'))
                         }
@@ -343,7 +342,6 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
                           'data-selected': isStart || isEnd || inSpan || globalIdx === detailIdx,
                           onClick: () => handleSelect(globalIdx),
                         },
-                          React.createElement('td', { className: 'cxpSeq' }, row.seq),
                           React.createElement('td', { className: 'cxpKindCell' },
                             (isStart ? React.createElement('span', { className: 'cxpSpanBadge' }, '起点') : null),
                             (isEnd ? React.createElement('span', { className: 'cxpSpanBadge' }, '终点') : null),

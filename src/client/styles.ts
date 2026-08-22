@@ -39,7 +39,6 @@ export const CSS = `
 .cxpLedger{flex:1;min-width:0;min-height:0;display:flex;position:relative;overflow:hidden;container-type:inline-size;--dsh-trajectory-bottom-clearance:calc(var(--dsh-composer-height,152px) + 16px)}
 .cxpTablePane{min-width:0;flex:1;position:relative;overflow:hidden auto;padding-bottom:var(--dsh-trajectory-bottom-clearance,0px)}
 .cxpTbl{border-spacing:0;table-layout:fixed;width:100%;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);font:var(--dsw-font-xxs-12)}
-.cxpTbl col.cxpColSeq{width:52px}
 .cxpTbl col.cxpColKind{width:84px}
 .cxpKindCell{text-align:right}
 .cxpTbl td{box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l1);height:28px;padding:0 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
@@ -50,7 +49,6 @@ export const CSS = `
 .cxpSummaryRow:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .cxpSummaryRow td{height:22px;color:var(--dsw-alias-label-tertiary)}
 .cxpSummaryEllipsis{color:var(--dsw-alias-label-caption);font-weight:600;margin-right:6px}
-.cxpSeq{color:var(--dsw-alias-label-caption);font:11px/16px var(--ds-font-family-code)}
 .cxpKindTag{box-sizing:border-box;letter-spacing:.035em;border-radius:4px;font-size:10px;font-weight:650;line-height:16px;padding:0 5px;display:inline-flex}
 .cxpKindTag[data-kind=user]{color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-state-business-tertiary)}
 .cxpKindTag[data-kind=context]{color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 68%,var(--dsw-alias-label-secondary));background:var(--dsw-alias-state-success-tertiary)}
