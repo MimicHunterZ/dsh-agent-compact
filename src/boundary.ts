@@ -56,15 +56,24 @@ function strippedText(s: string): string {
   )
 }
 
-// 唯一前缀匹配：锚点必须是恰好一个消息节点的归一化前缀，避免静默替换错节点；
+// 一个节点能否作为锚点匹配目标：只看 user/message、assistant/message；
 // tool/result 节点不参与匹配，进行中轮次的 tool-call 节点也被排除。
+// prefixHits（真正匹配）与 nearestHint（失败提示）共用同一条资格线，
+// 保证提示里推荐的候选永远是下一次真的可能命中的节点。
+function isEligibleAnchorNode(nodes: SurfaceNode[], i: number): boolean {
+  const node = nodes[i]
+  if (node.type !== 'user/message' && node.type !== 'assistant/message') return false
+  if (i === nodes.length - 1 && /\[tool-call/.test(nodeText(node, true))) return false
+  return true
+}
+
+// 唯一前缀匹配：锚点必须是恰好一个消息节点的归一化前缀，避免静默替换错节点。
 export function prefixHits(nodes: SurfaceNode[], anchor: string): number[] {
   const a = normText(anchor)
   const hits: number[] = []
   for (let i = 0; i < nodes.length; i++) {
+    if (!isEligibleAnchorNode(nodes, i)) continue
     const node = nodes[i]
-    if (node.type !== 'user/message' && node.type !== 'assistant/message') continue
-    if (i === nodes.length - 1 && /\[tool-call/.test(nodeText(node, true))) continue
     const n = normText(nodeText(node, true))
     const s = strippedText(nodeText(node, true))
     if (n.startsWith(a) || s.startsWith(a)) hits.push(i)
@@ -72,19 +81,51 @@ export function prefixHits(nodes: SurfaceNode[], anchor: string): number[] {
   return hits
 }
 
+// AMBIGUOUS 候选的预览：多条 checkpoint 消息共享官方注入的固定前缀
+// （host 的 `dsh-compaction-basic` 给每条 checkpoint 套的 preamble/
+// `<compacted-summary>` 标签，逐字相同）时，若每条都只截前 80 字，
+// 预览会完全一样、看不出该选哪个。这里先找出所有候选共享的最长前缀，
+// 跳过它再截 80 字，让预览从真正分叉的内容开始。
 function hitPreview(nodes: SurfaceNode[], hits: number[]): string {
-  return hits.map((i) => nodeSummaryLine(nodes, i)).join('\n')
+  const texts = hits.map((i) => nodeText(nodes[i], true))
+  const shared = hits.length > 1 ? commonPrefixLen(texts) : 0
+  return hits.map((i, k) => nodeSummaryLine(nodes, i, shared, texts[k])).join('\n')
+}
+
+function commonPrefixLen(texts: string[]): number {
+  if (texts.length < 2) return 0
+  let len = texts[0].length
+  for (let k = 1; k < texts.length && len > 0; k++) {
+    const b = texts[k]
+    let i = 0
+    const max = Math.min(len, b.length)
+    while (i < max && texts[0][i] === b[i]) i++
+    len = i
+  }
+  return len
 }
 
 // 匹配失败提示复用的单行摘要：`pos <下标> | seq <序号> | <类型>: <前 80 字预览>`。
-function nodeSummaryLine(nodes: SurfaceNode[], i: number): string {
-  return 'pos ' + i + ' | seq ' + nodes[i].seq + ' | ' + nodes[i].type + ': ' + preview(nodeText(nodes[i], true), 80)
+// skip>0 时表示与其它候选共享的前缀已被跳过，预览从分叉点开始（并标注跳过量）。
+function nodeSummaryLine(nodes: SurfaceNode[], i: number, skip?: number, text?: string): string {
+  const full = text ?? nodeText(nodes[i], true)
+  const shown = skip ? full.slice(skip) : full
+  const tag = skip ? ' (shared ' + skip + '-char prefix elided)' : ''
+  return 'pos ' + i + ' | seq ' + nodes[i].seq + ' | ' + nodes[i].type + tag + ': ' + preview(shown, 80)
+}
+
+// 把归一化文本切成用于重叠度打分的 token：ASCII/数字按 3+ 字符的连续片段
+// 切词（沿用原先"忽略过短词"的思路），CJK（中日韩）没有空格分词，逐字切开，
+// 否则一整句连续中文会被当成一个词，重叠度算法对中文锚点基本失效。
+const TOKEN_RE = /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7a3]|[A-Za-z0-9]{3,}/g
+function tokenize(s: string): string[] {
+  return s.match(TOKEN_RE) ?? []
 }
 
 // 按与锚点的词重叠度给节点排序，用于在匹配失败时提示该传什么内容。
 // 廉价、确定、足以作为提示。
 function anchorOverlap(nodeRaw: string, anchorNorm: string): number {
-  const words = anchorNorm.split(' ').filter((w) => w.length > 2)
+  const words = tokenize(anchorNorm)
   if (!words.length) return 0
   const n = normText(nodeRaw)
   let hit = 0
@@ -96,7 +137,9 @@ function anchorOverlap(nodeRaw: string, anchorNorm: string): number {
 
 function nearestHint(nodes: SurfaceNode[], anchorNorm: string): string {
   const scored = nodes
-    .map((n, i) => ({ i: i, score: anchorOverlap(nodeText(n, true), anchorNorm) }))
+    .map((_, i) => i)
+    .filter((i) => isEligibleAnchorNode(nodes, i))
+    .map((i) => ({ i: i, score: anchorOverlap(nodeText(nodes[i], true), anchorNorm) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, 3)
     .filter((s) => s.score > 0)

@@ -155,6 +155,70 @@ test('soleToolCall: true only for an assistant/message carrying exactly this one
   assert.equal(soleToolCall(notAssistant, 'call-1'), false)
 })
 
+test('resolveBoundaries: ambiguous checkpoint-style hits get shared-prefix-elided previews', () => {
+  // host 的 dsh-compaction-basic 给每条 checkpoint 套的固定 preamble/
+  // <compacted-summary> 标签逐字相同、远超 80 字；两条 checkpoint 撞上同一个
+  // 短锚点时，若预览还是从头截 80 字，两条会长得一模一样，没法据此选。
+  const preamble =
+    'This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. ' +
+    'Treat the captured context as established background and build on it without restating it. Continue the task ' +
+    'directly from the messages that follow, without acknowledging this checkpoint.\n\n<compacted-summary>'
+  const nodes = [
+    userNode(1, preamble + '## Dependency upgrade task (done)\nsome details'),
+    userNode(2, preamble + '## Nit cleanup task (done)\nother details'),
+  ]
+  let message = ''
+  try {
+    resolveBoundaries(nodes, { endAnchor: preamble })
+  } catch (err) {
+    message = err.message
+  }
+  assert.match(message, /AMBIGUOUS: 2 nodes/)
+  assert.match(message, /shared \d+-char prefix elided/)
+  const lines = message.split('\n').filter((l) => l.startsWith('pos '))
+  assert.equal(lines.length, 2)
+  assert.notEqual(lines[0], lines[1])
+  assert.match(lines[0], /Dependency upgrade/)
+  assert.match(lines[1], /Nit cleanup/)
+})
+
+test('resolveBoundaries: unmatched-anchor hint never recommends a tool/result or in-progress tool-call node', () => {
+  const nodes = [
+    userNode(1, 'please fix the login bug'),
+    // 这条 assistant/message 里嵌了一个失败的 context_compact 调用，参数里
+    // 逐字回带了锚点文本本身——旧的 nearestHint 不区分节点类型，词重叠算法
+    // 会把它当成"最接近"的候选推荐回来，纯属自我循环、毫无信息量。
+    assistantToolCallNode(2, 'call-1', 'context_compact', '{"endAnchor":"please fix the login zzz"}'),
+    toolResultNode(3, 'please fix the login zzz result text'),
+  ]
+  let message = ''
+  try {
+    resolveBoundaries(nodes, { endAnchor: 'please fix the login zzz' })
+  } catch (err) {
+    message = err.message
+  }
+  assert.match(message, /not found on the surface/)
+  assert.doesNotMatch(message, /tool\/result/)
+})
+
+test('resolveBoundaries: CJK anchor-overlap hint tokenizes by character, not by whole sentence', () => {
+  const nodes = [
+    userNode(1, '把插件依赖升级到最新版本并跑一遍测试'),
+    userNode(2, '完全不相关的另一段话'),
+  ]
+  // 锚点与 seq 1 共享前 12 个字，但结尾不同，不会作为前缀命中；旧的按空格
+  // 分词在没有空格的中文里会把整句当成一个词，几乎必然算出 0 重叠、给不出
+  // 任何提示。逐字切词后应该能算出 seq 1 明显更接近，把它列进提示里。
+  let message = ''
+  try {
+    resolveBoundaries(nodes, { endAnchor: '把插件依赖升级到最新版本，然后提交' })
+  } catch (err) {
+    message = err.message
+  }
+  assert.match(message, /not found on the surface/)
+  assert.match(message, /pos 0 \| seq 1/)
+})
+
 test('spanText: renders every node with its seq/pos/type header and keeps full text', () => {
   const nodes = [userNode(5, 'step done'), assistantTextNode(6, 'acknowledged')]
   const text = spanText(nodes, 0, 1)
