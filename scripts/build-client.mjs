@@ -1,29 +1,10 @@
-// Build lib/client.js for @mimichunterz/agent-compact (browser half of the
-// "上下文" surface panel).
-//
-// Two layers, assembled here into one self-contained window.__ModuleLoader__
-// bundle:
-//   1. The React VIEW layer (src/client/*.tsx) — real TSX, esbuild-bundled
-//      below with `react`/`react/jsx-runtime` marked external (the host
-//      page's ClientModuleSystem provides those as seed words; see that
-//      system's `makeRequire` in dsh-client-modules for why `require("react")`
-//      resolves correctly once nested inside this file's `factory(require)`).
-//   2. The Cordis WIRING layer ($mount/slots.register/apply) — kept as a
-//      hand-written template because it is Cordis plumbing, not UI, and the
-//      existing $mount-then-nested-plugin sequencing (see the `apply`
-//      comment below) is a real ordering constraint worth keeping visible
-//      and easy to audit, not something a bundler would express more
-//      clearly.
-//
-// The typert Remote schema block is NOT hand-typed here — it is extracted
-// verbatim from the tsc-compiled, compile-time-type-checked
-// lib/typert.remote-client.js (see src/typert.remote-client.ts). zod 4.4.3
-// itself is inlined by extracting the exact zod region from the shipped
-// dsh-api-remotes client bundle, so the schema instances carry the same
-// `_zod` marker the client typert registry validates.
-//
-// Loop: edit src/client/*.tsx or src/typert.remote-client.ts -> `npm run
-// build` (tsc then this script) -> refresh page (or wait for HMR).
+// 为 @mimichunterz/agent-compact 构建浏览器半边 bundle lib/client.js：
+// 1. React 视图层（src/client/*.tsx）由 esbuild 打包，react 保持 external
+//    （宿主页面通过 ClientModuleSystem 提供）；
+// 2. Cordis 接线层（$mount/slots.register/apply）保持为手写模板。
+// typert schema 块从 tsc 编译后的 lib/typert.remote-client.js 逐字提取；
+// zod 4.4.3 从官方 dsh-api-remotes bundle 中提取内联。
+// 修改后运行 `npm run build`（先 tsc 再本脚本）并刷新页面。
 import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -31,22 +12,17 @@ import * as esbuild from 'esbuild'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-// ---- 0. derive the browser schema block from the tsc-compiled, type-checked
-// lib/typert.remote-client.js — see that file's header. This mechanically
-// extracts the exact `z.object({...})`/`z.union([...])`/etc. construction
-// lines tsc emitted and rewrites `z.foo(` -> `foo(` because the browser
-// bundle's zod factories are unprefixed locals extracted from the shipped
-// dsh-api-remotes bundle in step 1 below, not `import { z } from 'zod'`.
-const remoteClientPath = join(root, 'lib', 'typert.remote-client.js')
-const remoteClientSrc = readFileSync(remoteClientPath, 'utf8')
-const schemaStart = remoteClientSrc.indexOf('const request$schema')
-const schemaEnd = remoteClientSrc.indexOf('export const TYPERT_REMOTE')
-if (schemaStart < 0 || schemaEnd < 0 || schemaEnd <= schemaStart) throw new Error('schema extraction failed: markers not found in lib/typert.remote-client.js (run tsc first)')
-const schemaBlock = remoteClientSrc
+// ---- 0. 从 src/ctx-surface.ts 提取 wire schema 定义区段（源文件中注释必然
+// 保留；schema 定义是纯 JS 表达式，tsc 不改写其内容），并把 `z.foo(` 改写成
+// `foo(`（浏览器 bundle 的 zod 工厂是无前缀局部变量）----
+const ctxSurfacePath = join(root, 'src', 'ctx-surface.ts')
+const ctxSurfaceSrc = readFileSync(ctxSurfacePath, 'utf8')
+const schemaStart = ctxSurfaceSrc.indexOf('export const request$schema')
+const schemaEnd = ctxSurfaceSrc.indexOf('// ctx-surface wire schemas end', schemaStart)
+if (schemaStart < 0 || schemaEnd < 0 || schemaEnd <= schemaStart) throw new Error('schema extraction failed: wire schema region not found in src/ctx-surface.ts')
+const schemaBlock = ctxSurfaceSrc
 	.slice(schemaStart, schemaEnd)
-	.split('\n')
-	.filter((line) => !line.includes('assertEqual('))
-	.join('\n')
+	.replace(/^export const /gm, 'const ')
 	.replace(/\bz\./g, '')
 	.replace(/\brequest\$schema\b/g, '_ctxSurface_read_request$schema')
 	.replace(/\bblock\$schema\b/g, '_ctxSurface_read_block$schema')
@@ -55,7 +31,7 @@ const schemaBlock = remoteClientSrc
 	.trim()
 if (!schemaBlock.includes('_ctxSurface_read_result$schema')) throw new Error('schema extraction failed: result$schema rename missed')
 
-// ---- 1. extract the inlined zod 4.4.3 region from dsh-api-remotes ----
+// ---- 1. 从 dsh-api-remotes 提取内联的 zod 4.4.3 区段 ----
 const apiRemotesPath = '/Users/mimiczhang/.nvm/versions/node/v24.15.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-remotes/lib/client.js'
 const apiRemotes = readFileSync(apiRemotesPath, 'utf8').split('\n')
 const zodStart = apiRemotes.findIndex((l) => l.includes('//#region') && l.includes('zod/v4/core/core.js'))
@@ -64,11 +40,8 @@ const zodEnd = apiRemotes.findIndex((l, i) => i > schemasRegion && l.trim() === 
 const zodCode = apiRemotes.slice(zodStart, zodEnd + 1).join('\n')
 if (!zodCode.includes('function readonly')) throw new Error('zod extraction failed: missing readonly factory')
 
-// ---- 2. esbuild the React view layer (src/client/entry.tsx) ----
-// react/jsx-runtime stay external: the host page supplies them as platform
-// seed words through the custom `require` this whole bundle receives, not
-// through a real bundled copy — bundling our own React would create a
-// second React instance and break hooks across the plugin boundary.
+// ---- 2. 用 esbuild 构建 React 视图层（src/client/entry.tsx）----
+// react 保持 external：打包我们自己的 React 会创建第二个实例并破坏 hooks。
 const viewBuild = esbuild.buildSync({
 	entryPoints: [join(root, 'src/client/entry.tsx')],
 	bundle: true,
@@ -83,7 +56,7 @@ const viewBuild = esbuild.buildSync({
 if (viewBuild.errors.length > 0) throw new Error('esbuild failed:\n' + viewBuild.errors.map((e) => e.text).join('\n'))
 const viewBundleCode = viewBuild.outputFiles[0].text
 
-// ---- 3. head ----
+// ---- 3. 头部 ----
 const head = `window.__ModuleLoader__.load({
 	id: "@mimichunterz/agent-compact",
 	factory: (require) => {
@@ -92,9 +65,9 @@ const head = `window.__ModuleLoader__.load({
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 `
 
-// ---- 4. tail: typert descriptors + esbuild view bundle + apply ----
+// ---- 4. 尾部：typert 描述符 + esbuild 视图 bundle + apply ----
 const tail = `
-		//#region typert.remote-client (extracted from tsc-compiled, type-checked lib/typert.remote-client.js — see step 0 above)
+		//#region ctx-surface wire schemas（自 lib/ctx-surface.js 提取）
 		${schemaBlock}
 		const TYPERT_REMOTE = {
 			package: '@mimichunterz/agent-compact',
@@ -124,7 +97,7 @@ const tail = `
 		}
 		//#endregion
 
-		//#region ctx-surface view bundle (esbuild-compiled from src/client/entry.tsx — nested module/exports scope so it cannot collide with this file's own)
+		//#region ctx-surface 视图 bundle（esbuild 编译自 src/client/entry.tsx）
 		const ctxSurfaceViewModule = (function () {
 			var module = { exports: {} };
 			var exports = module.exports;
@@ -144,14 +117,8 @@ ${viewBundleCode}
 		//#endregion
 
 		//#region apply
-		// Top-level inject must NOT include remote.ctxSurface: this bundle is
-		// the only provider of that namespace (it $mounts it in apply), so
-		// declaring it at entry level would deadlock the boot sweep (pending
-		// (waiting for service: remote.ctxSurface)). Instead the namespace is
-		// mounted first, then consumed from a nested sub-plugin whose own
-		// inject declares it — by then the namespace fiber is already ACTIVE,
-		// so the sub-plugin's inject resolves immediately and its ctx passes
-		// the reflect guard when readSurface touches ctx.remote.ctxSurface.
+		// 顶层 inject 不能包含 remote.ctxSurface（本 bundle 是唯一提供者，入口层
+		// 声明会死锁启动）；改为先 $mount 命名空间，再从嵌套子插件中消费。
 		const inject = ["slots", "remote"];
 		async function apply(ctx) {
 			await ctx.remote.$mount(TYPERT_REMOTE);

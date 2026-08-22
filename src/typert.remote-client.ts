@@ -1,46 +1,7 @@
-// Client-side typert Remote descriptors for `ctxSurface/read` (Node-facing
-// export only — the actual browser bundle in lib/client.js extracts this
-// exact compiled text verbatim in scripts/build-client.mjs so the browser
-// copy can never independently drift; see that script's header comment).
-//
-// Real TypeScript source compiled by `tsc`, type-checked against
-// ctx-surface.ts the same way as typert.host.ts — see that file's header
-// for why this matters, INCLUDING the optional-field blind spot: a new
-// optional CtxSurfaceRow field must be added to row$schema by hand here
-// too, or it silently vanishes on the wire with no compile error.
-import { z } from 'zod'
-import type { CtxSurfaceBlock, CtxSurfaceReadRequest, CtxSurfaceReadResult, CtxSurfaceRow } from './ctx-surface.js'
-
-type Equal<A, B> = A extends B ? (B extends A ? true : false) : false
-function assertEqual<A, B>(_check: Equal<A, B>): void {}
-
-const request$schema = z.object({
-  sessionId: z.intersection(z.string(), z.unknown()).readonly(),
-})
-assertEqual<z.infer<typeof request$schema>, CtxSurfaceReadRequest>(true)
-
-const block$schema = z.object({
-  kind: z.union([z.literal('text'), z.literal('reasoning'), z.literal('tool-call'), z.literal('tool-result'), z.literal('image'), z.literal('block')]).readonly(),
-  label: z.string().readonly().optional(),
-  text: z.string().readonly(),
-  chars: z.number().readonly(),
-})
-assertEqual<z.infer<typeof block$schema>, CtxSurfaceBlock>(true)
-
-const row$schema = z.object({
-  seq: z.number().readonly(),
-  type: z.string().readonly(),
-  text: z.string().readonly(),
-  chars: z.number().readonly(),
-  blocks: z.array(block$schema).readonly(),
-  source: z.string().readonly().optional(),
-})
-assertEqual<z.infer<typeof row$schema>, CtxSurfaceRow>(true)
-
-const result$schema = z.object({
-  rows: z.array(row$schema).readonly(),
-}).readonly()
-assertEqual<z.infer<typeof result$schema>, CtxSurfaceReadResult>(true)
+// `ctxSurface/read` 的客户端 typert Remote 描述符。
+// schema 复用 ./ctx-surface.ts；浏览器 bundle 由 scripts/build-client.mjs 从
+// 编译产物中提取（见该脚本），本文件仅面向 Node 侧消费。
+import { request$schema, result$schema } from './ctx-surface.js'
 
 export const TYPERT_REMOTE = {
   package: '@mimichunterz/agent-compact',
