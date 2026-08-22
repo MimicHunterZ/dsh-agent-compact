@@ -1,19 +1,7 @@
-// @mimichunterz/agent-compact: shared optimizer core (import-free).
-//
-// The tools plugin (lib/index.js) lazily patches the host compaction engine on
-// first tool use via patchEngine(). The ONLY thing the patch does is make the
-// engine's summarize() honor agent-provided checkpoints:
-//
-//   - context_compact hands the agent-written Markdown checkpoint to the
-//     engine through _externalSummary (one-shot, keyed per session id);
-//   - the patched summarize() returns that text directly — no LLM call, no
-//     re-summarization — while the whole durable transaction (boundary
-//     validation, tool-pair balance, compaction/start-end markers, surface
-//     replace, spill archive) stays in the stock engine;
-//   - every other path (automatic pressure/overflow, /compact) is untouched:
-//     with no injected checkpoint the patched summarize() forwards straight to
-//     the stock implementation, so automatic compaction keeps the official
-//     behavior exactly.
+// @mimichunterz/agent-compact: 共享的优化器核心（零依赖）。
+// patchEngine() 修补主机压缩引擎的 summarize()，使其尊重 agent 提供的检查点
+// （_externalSummary，一次性、按会话 id 为键）：存在时直接返回该文本（不发
+// LLM 请求）；不存在时转发原版实现，自动压缩行为保持不变。
 
 export interface SurfaceNode {
   seq: number
@@ -24,8 +12,8 @@ export interface SessionLike {
   id: string
   surface?: { nodes?: readonly number[] }
   events?: readonly unknown[]
-  // `SessionEvent` is not exported by the packages; `any` keeps the structural
-  // shape assignable to the real `(event: SessionEvent) => Message | null`.
+  // `SessionEvent` 没有被这些包导出；`any` 让结构形状可以赋值给真实的
+  // `(event: SessionEvent) => Message | null`。
   deriveEventMessage?: (event: any) => unknown
   requestHeader?: () => { config?: { provider?: string; model?: string } } | undefined
 }
@@ -36,26 +24,22 @@ export interface AgentLike {
   ctx?: unknown
 }
 
-/** The engine surface the patch relies on (structural and defensive; the real
- * engine is a BasicCompactionEngine, which carries these members). */
+/** 修补所依赖的引擎表面（结构化且防御性；真实引擎是 BasicCompactionEngine，
+ * 携带这些成员）。 */
 export interface OptimizedEngineLike {
   /**
-   * Agent-provided checkpoint text, keyed per session id (one-shot: consumed
-   * by the next summarize for that session). When present, the patched
-   * summarize() returns this text as the summary — the executing agent writes
-   * the replacement checkpoint itself, so no LLM summarizer call is made.
+   * agent 提供的检查点文本，按会话 id 为键（一次性：被该会话的下一次
+   * summarize 消费）。存在时，被修补的 summarize() 直接把它作为摘要返回——
+   * 执行中的 agent 自行编写替换检查点，因此不会发起 LLM 摘要调用。
    */
   _externalSummary?: Record<string, string>
   summarize?: (input: unknown, agent: unknown, signal?: AbortSignal) => Promise<unknown>
-  /** Patch version; bump when patch behavior changes (see below). */
+  /** 补丁版本；修补行为变化时递增（见下文）。 */
   __ctxcOptimized?: number
 }
 
-// The compaction engine is a host-level singleton that survives plugin HMR.
-// A plain boolean guard would freeze the summarize closure on the FIRST patch,
-// so later optimizer edits (e.g. the checkpoint injection) would never take
-// effect until a process restart. The versioned guard re-binds summarize on
-// every patch so code edits hot-apply.
+// 压缩引擎是主机级单例（HMR 后存活），用带版本的守卫在每次修补时重新绑定
+// summarize，使代码修改可以热生效。
 export const PATCH_VERSION = 3
 
 export function patchEngine(engine: OptimizedEngineLike): boolean {
@@ -69,8 +53,8 @@ export function patchEngine(engine: OptimizedEngineLike): boolean {
     if (sid && ext && typeof ext[sid] === 'string') {
       const text = ext[sid]
       delete ext[sid]
-      // Same runtime shape the stock summarizer returns (text summary +
-      // usage envelope); the engine's frameSummary + size check still apply.
+      // 与原版 summarizer 返回的运行时形状相同（文本摘要 + usage 信封）；
+      // 引擎的 frameSummary 与大小检查仍然生效。
       return {
         summary: [{ type: 'text', text }],
         rawOutput: [],

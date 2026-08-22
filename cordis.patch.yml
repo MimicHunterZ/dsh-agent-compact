@@ -1,25 +1,17 @@
-# @mimichunterz/agent-compact bundle layer: registers the context compression tools at the
-# host level (visible to every session, like the built-in bash/fs tools).
+# @mimichunterz/agent-compact bundle 层：在主机层注册上下文压缩工具（每个会话可见）。
+# 安装：dsh plugin --profile web add @mimichunterz/agent-compact
 #
-# Installed with:  dsh plugin --profile web add @mimichunterz/agent-compact
-# (or `add ./agent-compact` from a checkout; see docs/user/develop/basic/publish.md)
-#
-# Optional: pass configuration through this row:
+# 可选配置：
 #   config:
 #     autoArchive: true
 #
-# The tool hands the agent-written checkpoint to the host compaction engine
-# (one-shot, injected per session); automatic pressure/overflow compaction and
-# /compact keep the official engine behavior untouched.
+# 该工具把 agent 编写的检查点交给主机压缩引擎；自动压缩与 /compact 保持官方行为。
 - insert:
     - id: tool-context-compression
       name: '@mimichunterz/agent-compact'
 
-# Durable spill root for this plugin's raw-span archives: files land at
-# $DSH_HOME/spill/session-<hash>/<hex>-<NNN>.txt (the local spill backend
-# scopes per session). The shipped spill default is a per-process mkdtemp under
-# TMPDIR — ephemeral and outside the workspace. Bundle layers apply before the
-# profile's own cordis.patch.yml, so a deployment may still override this row.
+# 原始区间归档的持久 spill 根目录（$DSH_HOME/spill/...）；官方默认是进程级
+# 临时目录。bundle 层先于 profile 的 cordis.patch.yml 应用，部署方仍可覆盖。
 - id: spill-local
   config:
     root: !!js dshHomePath('spill')

@@ -7,9 +7,7 @@ const EMPTY_ROWS: readonly CtxSurfaceRow[] = []
 const DEFAULT_DETAILS_WIDTH = 380
 const MIN_DETAILS_WIDTH = 320
 
-// Table rows after the Turns/Calls fold is applied: either a real surface
-// row, or one synthetic summary row standing in for a run of hidden rows
-// (clicking it expands just that run — see expandGroup below).
+// Turns/Calls 折叠后的表格行：真实行或折叠汇总行。
 type DisplayItem =
   | { readonly kind: 'row'; readonly globalIdx: number; readonly row: CtxSurfaceRow }
   | { readonly kind: 'summary'; readonly key: string; readonly count: number }
@@ -26,21 +24,10 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
   const [refreshTick, setRefreshTick] = React.useState(0)
   const [detailsWidth, setDetailsWidth] = React.useState(DEFAULT_DETAILS_WIDTH)
   const resizeStartRef = React.useRef<{ startX: number; startWidth: number } | null>(null)
-  // Clicking a timeline span above only ever changed detailIdx/highlight
-  // state; nothing scrolled the ledger table underneath so the newly
-  // selected row could sit off-screen with no visual link back to the
-  // span the user just clicked. rowElRefs holds every currently-rendered
-  // <tr> (both real rows and folded summary rows) keyed by the same DOM
-  // key domKeyOf resolves a row's globalIdx to, so the effect below can
-  // find and scroll to whichever element actually represents the newly
-  // selected row — even one hidden inside a collapsed Turns/Calls run.
+
   const rowElRefs = React.useRef<Map<string, HTMLTableRowElement>>(new Map())
 
-  // View-bar state: the Duration/Turns/Calls-equivalent row rendered under
-  // the main toolbar (see styles.ts's cxpViewBar). `actualWidth` mirrors
-  // trajectory's own duration toggle semantics (default = equal-width,
-  // toggle on = proportional sizing) but proportions by `chars` instead of
-  // wall-clock duration, since CtxSurfaceRow carries no timestamp.
+  // 视图栏状态：Duration/Turns/Calls 等价行；actualWidth 按 chars 比例分配宽度。
   const [actualWidth, setActualWidth] = React.useState(false)
   const [turnsCollapsed, setTurnsCollapsed] = React.useState(false)
   const [callsCollapsed, setCallsCollapsed] = React.useState(false)
@@ -134,18 +121,10 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
     return item
   })
 
-  // Turn-boundary tick marks in the timeline (see styles.ts's
-  // cxpTlTurnBoundary, defined but unused before this pass): one vertical
-  // line at the left edge of every turn after the first, mirroring
-  // trajectory's own `:not(:first-child)` boundary rule.
+  // 轮次边界刻度：在每个轮次左缘画一条竖线。
   const turnBoundaries = tlSpans.filter((s, i) => i > 0 && isTurnStart(s.row)).map((s) => s.left)
 
-  // Fold consecutive rows into one summary line when Turns/Calls collapse
-  // is on — a run the user already expanded (expandGroup) stays inline.
-  // domKeyOf maps EVERY filtered row's globalIdx (visible or folded) to
-  // the dom-ref key of whichever <tr> currently represents it, so the
-  // scroll-sync effect below can resolve a click on any row — including
-  // one hidden inside a collapsed summary — to a real element on screen.
+  // domKeyOf：把每行的 globalIdx 映射到当前代表它的 <tr> 的 ref key，供滚动同步使用。
   const { displayItems, domKeyOf } = React.useMemo<{ displayItems: DisplayItem[]; domKeyOf: Map<number, string> }>(() => {
     const items: DisplayItem[] = []
     const domKeyOf = new Map<number, string>()
@@ -201,14 +180,7 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
     return { displayItems: items, domKeyOf }
   }, [filtered, rows, turnsCollapsed, callsCollapsed, expandedKeys])
 
-  // Scroll the ledger's own scroller (cxpTablePane, not the page) to
-  // whichever <tr> now represents detailIdx — fires for every selection
-  // source (timeline span click, table row click, future callers alike)
-  // since handleSelect always funnels through setDetailIdx. behavior/block
-  // match the shipped trajectory panel's own record-jump effect byte for
-  // byte (dsh-client-ui-trajectory/lib/client.js's openRecordSummary/
-  // pendingScrollRecordId effect: `row.scrollIntoView({behavior:"smooth",
-  // block:"center"})`) instead of an instant 'nearest' jump.
+  // 滚动台账的滚动容器到当前 detailIdx 对应的 <tr>（平滑、居中）。
   React.useEffect(() => {
     if (detailIdx === null) return
     const key = domKeyOf.get(detailIdx)

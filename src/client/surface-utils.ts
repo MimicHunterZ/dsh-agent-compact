@@ -1,7 +1,4 @@
-// Pure helpers for the ctx-surface panel: row classification, timeline
-// geometry, and the anchor-based compress-prompt builder that keeps a
-// user-picked span in this panel mapped 1:1 to context_compact's
-// startAnchor/endAnchor resolution (see ../ctx-surface.ts's module doc).
+// ctx-surface 面板的纯辅助函数：行分类、时间线几何、锚点压缩提示构造。
 import type { CtxSurfaceRow } from './types.js'
 
 export function isToolRow(row: CtxSurfaceRow): boolean {
@@ -12,40 +9,28 @@ export function isToolCallOnly(row: CtxSurfaceRow): boolean {
   return row.type === 'assistant/message' && row.blocks.length > 0 && row.blocks.every((b) => b.kind === 'tool-call')
 }
 
-// Mirrors the shipped trajectory panel's own kind classification (see its
-// trajectory-message-definitions.js): a `user/message` row whose recorded
-// `source.kind` is anything other than `'user'` (plugin/system reminder,
-// session recall, skill invocation, ...) is a synthetic "context" row, not
-// a real user turn — same distinction trajectory colors green vs blue.
+// 镜像官方 trajectory 的类型分类：source.kind 非 'user' 的 user/message 行
+// 是合成的 "context" 行，而非真实用户轮次。
 export function rowKind(row: CtxSurfaceRow): 'user' | 'context' | 'message' | 'tool' {
   if (row.type === 'tool/result') return 'tool'
   if (row.type === 'user/message') return row.source !== undefined && row.source !== 'user' ? 'context' : 'user'
   return 'message'
 }
 
-// timeline lane: tool/result -> 2, assistant/message -> 1, everything else -> 0.
+// 时间线泳道：tool/result -> 2，assistant/message -> 1，其余 -> 0。
 export function laneOf(row: CtxSurfaceRow): number {
   if (row.type === 'tool/result') return 2
   if (row.type === 'assistant/message') return 1
   return 0
 }
 
-// A new "turn" starts at every real or synthetic input row (rowKind user or
-// context) — our flat surface has no server-side turn number the way
-// trajectory's own event-log analysis does, so grouping for the Turns
-// toggle is derived purely from this boundary.
+// 每个输入行（user 或 context）开启一个新的 "turn"。
 export function isTurnStart(row: CtxSurfaceRow): boolean {
   const k = rowKind(row)
   return k === 'user' || k === 'context'
 }
 
-// Short badge text for the kind tag — mirrors trajectory's own table
-// (USER/ASSISTANT/TOOL/CONTEXT), instead of the raw `user/message` /
-// `assistant/message` / `tool/result` wire type string, which is long
-// enough to force the whole 类型 column wide and crowd out the content
-// preview column. The full wire type stays available as the tag's title
-// attribute (see CtxSurfaceView.tsx) so nothing is lost, just not shown by
-// default.
+// 类型标签的短徽标（USER/ASSISTANT/TOOL/CONTEXT）；完整线上类型保留在 title。
 const KIND_LABEL: Record<ReturnType<typeof rowKind>, string> = {
   user: 'USER',
   context: 'CONTEXT',
@@ -64,12 +49,7 @@ export function rowPreview(row: CtxSurfaceRow): string {
   }
   for (const b of row.blocks) if (b.kind === 'tool-call') return b.text.slice(0, 40)
   if (row.text.slice(0, 120)) return row.text.slice(0, 120)
-  // row.text deliberately drops image markers now (see ctx-surface.ts's
-  // blockText dropImages — keeps compressPrompt's anchors matching
-  // index.ts's own image-free anchor text), so an image-only row with no
-  // caption would otherwise show '(空)' with no hint an image is there;
-  // row.blocks still carries the untouched per-block entries, so fall back
-  // to that before giving up.
+  // row.text 已去掉图片标记，图片行回退到 row.blocks 判断。
   if (row.blocks.some((b) => b.kind === 'image')) return '[图片]'
   return '(空)'
 }
@@ -82,10 +62,9 @@ function normAnchor(s: string): string {
 }
 
 /**
- * Build the shortest normalized prefix of one row's flattened text that is
- * unique among all rows — this is the exact anchor text context_compact's
- * startAnchor/endAnchor resolution matches against, so it must stay in sync
- * with that tool's own prefix-growth algorithm (see the tool's own doc).
+ * 构建一行扁平文本的最短归一化前缀，且该前缀在所有行中唯一——这正是
+ * context_compact 的 startAnchor/endAnchor 解析要匹配的锚点文本，因此必须与
+ * 该工具自身的前缀增长算法保持同步（参见工具自身的文档）。
  */
 export function uniqueAnchorPrefix(rows: readonly CtxSurfaceRow[], idx: number): string {
   const target = rows[idx]
@@ -99,9 +78,8 @@ export function uniqueAnchorPrefix(rows: readonly CtxSurfaceRow[], idx: number):
     if (!collides) break
     len += 1
   }
-  // map normalized length back onto the raw (un-normalized) text: normAnchor
-  // only removes whitespace/punctuation, never reorders, so walking the raw
-  // string until it has produced `len` normalized characters is safe.
+  // 把归一化长度映射回原始（未归一化）文本：normAnchor 只删除空白/标点，从不
+  // 重排，因此在原始字符串上走到产生 `len` 个归一化字符是安全的。
   let rawEnd = 0
   let produced = 0
   while (rawEnd < flat.length && produced < len) {

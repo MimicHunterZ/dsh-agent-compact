@@ -1,7 +1,4 @@
-// Shared client-side types for the ctx-surface panel. Mirrors the wire
-// shapes in ../ctx-surface.ts (kept as plain duplicated types here because
-// this file compiles under a separate esbuild pass with `react`/jsx that the
-// main tsc project does not need to see — see scripts/build-client.mjs).
+// ctx-surface 面板的客户端类型，镜像 ../ctx-surface.ts 的线上类型。
 
 export interface CtxSurfaceBlock {
   readonly kind: 'text' | 'reasoning' | 'tool-call' | 'tool-result' | 'image' | 'block'
@@ -16,11 +13,8 @@ export interface CtxSurfaceRow {
   readonly text: string
   readonly chars: number
   readonly blocks: readonly CtxSurfaceBlock[]
-  // Mirrors ../ctx-surface.ts's CtxSurfaceRow.source: raw `data.source.kind`
-  // off a `user/message` event, undefined for every other row type. Used to
-  // tell a real user turn (source.kind === 'user') apart from a
-  // synthetically-injected "context" row, exactly like the shipped
-  // trajectory panel does.
+  // 镜像 ../ctx-surface.ts：原始 `data.source.kind`，区分真实用户轮次与
+  // 合成注入的 "context" 行。
   readonly source?: string
 }
 

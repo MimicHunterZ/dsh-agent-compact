@@ -1,10 +1,6 @@
-// @mimichunterz/agent-compact: context compression tools (bundle plugin).
-//
-// Official plugin shape: named `name` / `Config` / `apply(ctx, config)`
-// exports (see docs/user/develop/basic/config.md in deepseek-harness).
-// Registers one model-visible tool (context_compact) and lazily patches the
-// per-session compaction engine on first use so its summarize() honors
-// agent-written checkpoints (see ./optimizer.js).
+// @mimichunterz/agent-compact: 上下文压缩工具（bundle 插件）。
+// 注册模型可见的 context_compact 工具，并在首次使用时修补压缩引擎，
+// 使其 summarize() 尊重 agent 自行编写的检查点（参见 ./optimizer.js）。
 
 import { createHash } from 'node:crypto'
 import { readdir } from 'node:fs/promises'
@@ -33,23 +29,12 @@ export const Config: Schema<Config> = Schema.object({
 })
 
 export function apply(ctx: Context, config: Config) {
-  // NOTE: sessionQuery AND agentPresets are deliberately NOT captured here.
-  // Both are resolved per call through resolveService(): the session-query
-  // sqlite row and the agent-presets registry mount only after their own
-  // dependency chains are up, so capturing `ctx.get('sessionQuery')` or
-  // `ctx.get('agentPresets')` at apply time raced the boot order and left the
-  // context_compact tool broken ('compaction service is not available in this
-  // runtime (tried host plane and preset realm)') on processes where this
-  // plugin's apply won the race — the tool row injects only `tools` (provided
-  // by the dsh-base bundle), which is up before the web-app bundle's
-  // agent-presets row registers.
+  // 注意：sessionQuery 与 agentPresets 必须在每次调用时解析——它们在 apply
+  // 时可能尚未挂载，此时捕获会让 context_compact 工具失效。
   const tools = ctx.get('tools')
   if (!tools) throw new Error('@mimichunterz/agent-compact: tools service unavailable')
 
-  // Provide the live-surface reader for the browser "上下文" panel. Constructing
-  // the TypertRemoteService registers the `ctxSurface` service (and its
-  // `ctxSurface/read` gateway endpoint) for this plugin's fiber; the client
-  // bundle mounts the matching descriptors and calls ctx.remote.ctxSurface.read.
+  // 为浏览器「上下文」面板注册 ctxSurface 服务（`ctxSurface/read`）。
   new CtxSurfaceService(ctx)
 
   interface AgentWithSession extends AgentLike {
@@ -71,8 +56,8 @@ export function apply(ctx: Context, config: Config) {
     readSurface(sessionId: string): Promise<{ events?: unknown } | null>
   }
 
-  // Type alias (not interface) so it carries an implicit index signature and
-  // stays assignable to JsonValue when embedded in tool results.
+  // 使用类型别名（而非 interface），使其携带隐式索引签名，
+  // 嵌入工具结果时仍可赋值给 JsonValue。
   type SurfaceArchive = {
     locator: JsonValue
     bytes: JsonValue
@@ -105,9 +90,8 @@ export function apply(ctx: Context, config: Config) {
     sourceEventSeqs?: unknown
   }
 
-  // The assistant/message that carries exactly this one tool-call (used to
-  // decide whether the call's message node can be shadowed without breaking
-  // sibling tool calls in the same message).
+  // 恰好携带这一个 tool-call 的 assistant/message 节点（用于判断该调用所属的
+  // 消息节点能否被 shadow，而不破坏同一条消息里的其他兄弟 tool-call）。
   function soleToolCall(n: SurfaceNode, callId: string): boolean {
     if (n.type !== 'assistant/message') return false
     const content = (n.data as { message?: { content?: unknown } } | undefined)?.message?.content
@@ -128,52 +112,14 @@ export function apply(ctx: Context, config: Config) {
     content?: unknown
   }
 
-  // ---- volume-nudge: cold-start proactive-compaction reminder ----
-  //
-  // The static system-prompt section above only tells the model WHAT good
-  // judgment looks like; it carries no live signal for WHEN to act, so a
-  // "read some logs, found the bug, now compact" moment has nothing concrete
-  // to trigger on (discussed at length with the user — see conversation).
-  // This closes that gap with a mechanical, model-agnostic proxy: how much
-  // the session's occupancy has grown since its last compaction, and once
-  // that growth crosses another multiple of config.volumeNudgeTokens, say
-  // so. Deliberately NOT tied to the model's context-window ratio or the
-  // compaction engine's own pressure threshold — the user was explicit that
-  // ratio-vs-threshold is "the system's own job" (dsh-compaction-basic
-  // already auto-compacts at 80% window pressure via agent/pre-step); this is
-  // a separate, size-based nudge toward doing it EARLIER with model-curated
-  // judgment, not a replacement safety net.
-  //
-  // Deliberately measures the WHOLE occupancy, not just tool results: the
-  // model's own reasoning/prose is real growth too (often the bigger half
-  // with a reasoning model), so a tool-result-only counter would
-  // systematically under-count and never fire for a verbose, tool-light
-  // stretch of the conversation.
-  //
-  // Metric, in preference order (the user pushed back on settling for a pure
-  // heuristic — this is the more accurate answer that pushback surfaced):
-  //
-  //  1. ctx.sessionProjections.snapshot(session).values.contextPressure
-  //     .projectedTokens — dsh-token-meter's own occupancy projection.
-  //     `pressureTokens` underneath it is NOT a heuristic: it is
-  //     `usage.inputTokens + cacheReadTokens + cacheWriteTokens` read
-  //     straight off the provider's OWN wire `usage` block (DeepSeek's real
-  //     tokenizer count for that exact request — see `mapUsage()` in
-  //     dsh-llm-deepseek/lib/index.js and `pressureFrom()` in
-  //     dsh-token-meter/lib/index.js). `projectedTokens` adds only the
-  //     surface's signed movement since that sample was taken, so estimation
-  //     error can never compound for more than one request's worth of new
-  //     content — it resyncs to ground truth on every single LLM call.
-  //  2. ctx.tokenMeter.measure(session).surfaceTokens — the same fixed
-  //     chars/4 heuristic (CHARS_PER_TOKEN = 4 in dsh-token-meter/lib/index.js)
-  //     the real pressure-based auto-compactor prices against. Used only when
-  //     (1) is unavailable, e.g. no request has completed yet this session.
-  //
-  // Both fold incrementally per session (cheap to call every step) and
-  // naturally reflect anything else that shrinks the surface (e.g.
-  // toolResultPruner, compaction itself) without us tracking it separately.
-  // Reading either costs nothing extra when the service is absent — the
-  // whole feature just no-ops down to the next available layer.
+  // ---- volume-nudge：冷启动的主动压缩提醒 ----
+  // 用会话占用量的增长量作为提醒信号：自上次压缩以来增长每跨过
+  // config.volumeNudgeTokens 的一个整数倍，就提示模型考虑压缩。
+  // 度量指标按优先级：
+  //  1. sessionProjections 的 contextPressure.projectedTokens（provider 真实
+  //     usage 的投影，每次 LLM 调用都会重新同步到真实值）；
+  //  2. tokenMeter 的 surfaceTokens（chars/4 启发式），仅当 (1) 不可用时使用。
+  // 两者均按会话增量累积，服务缺席时整个特性降级为 no-op。
   const volumeBaseline = new WeakMap<SessionLike, number>()
 
   interface TokenMeterLike {
@@ -210,8 +156,6 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
-  // Best available occupancy metric for `session` — see the long comment
-  // above for why (1) is preferred over (2).
   function occupancyTokensOf(session: SessionLike): number | null {
     const projected = contextPressureProjectedTokensOf(session)
     if (projected !== null) return projected
@@ -221,11 +165,7 @@ export function apply(ctx: Context, config: Config) {
   function resolveService(agent: AgentLike, serviceName: string): unknown {
     const direct = ctx.get(serviceName)
     if (direct) return direct
-    // agentPresets is resolved PER CALL (never captured at apply time): the
-    // agent-presets registry mounts only after its own dependency chain is up,
-    // and this bundle row injects only `tools`, so a boot-time capture races
-    // the registry and permanently kills the preset-realm path. Same reason
-    // sessionQuery is resolved per call below.
+    // agentPresets 按每次调用解析（apply 时注册表可能尚未挂载）。
     const agentPresets = ctx.get('agentPresets')
     const presets = agentPresets as { serviceFor?: (agent: { ctx: unknown }, name: string) => unknown } | undefined
     if (presets && typeof presets.serviceFor === 'function' && agent && agent.ctx) {
@@ -233,7 +173,7 @@ export function apply(ctx: Context, config: Config) {
         const viaPreset = presets.serviceFor({ ctx: agent.ctx }, serviceName)
         if (viaPreset) return viaPreset
       } catch (e) {
-        /* fall through */
+        /* 忽略错误，继续向下 */
       }
     }
     return undefined
@@ -245,7 +185,7 @@ export function apply(ctx: Context, config: Config) {
     return agent as AgentWithSession
   }
 
-  // ---- surface text extraction ----
+  // ---- surface 文本提取 ----
   function nodeContent(n: SurfaceNode): unknown {
     const d = (n.data as SurfaceNodeData | undefined) ?? null
     if (!d) return null
@@ -259,23 +199,8 @@ export function apply(ctx: Context, config: Config) {
     return null
   }
 
-  // `skipReasoning` keeps the ANCHOR-MATCHING text aligned with what the model
-  // sees: the DeepSeek adapter moves `reasoning` blocks into the separate
-  // `reasoning_content` wire field (tool-call turns) or drops them (text
-  // turns), so the model's view of a message starts at its visible text — not
-  // at the reasoning the plugin would otherwise concatenate first. The archive
-  // keeps the full raw text (skipReasoning = false).
-  //
-  // Images are skipped for the SAME reason when skipReasoning is true: an
-  // anchor is verbatim text the model composes by hand, and a message that
-  // opens with one or more images before its real text (`content` puts the
-  // image block(s) first) used to force every anchor to start with a literal
-  // "[image]\n[image]\n..." prefix the model had no way to know about —
-  // `startAnchor not found` even though the real text prefix matched
-  // perfectly starting right after the images. Only affects the
-  // ANCHOR-MATCHING view; the archived spill text (skipReasoning = false,
-  // see nodeText's only default-false call site below) still records
-  // "[image]" markers, so nothing is lost from the durable record.
+  // skipReasoning：让锚点匹配文本与模型所见对齐（跳过 reasoning 与图片块）；
+  // 归档（skipReasoning = false）保留完整原文。
   function blockText(b: unknown, depth: number, skipReasoning: boolean): string {
     if (depth > 5 || !b || typeof b !== 'object') return ''
     const blk = b as AnyBlock
@@ -324,22 +249,14 @@ export function apply(ctx: Context, config: Config) {
     return snap && Array.isArray(snap.events) ? (snap.events as SurfaceNode[]) : []
   }
 
-  // ---- anchor-based boundary resolution ----
-  // The model does not need a surface listing: it passes verbatim text of
-  // the first node (startAnchor) and/or last node (endAnchor) of the span, and
-  // the tool locates the seqs by normalized text match on the CURRENT surface.
-  // Anchors resolve afresh on every call, so repeated compactions never go
-  // stale after earlier checkpoints replaced old nodes. Boundary seqs still
-  // win when both are given. Matched edges are snapped to balanced
-  // tool-call/result boundaries (start back to the pair opener, end forward
-  // through the closing results) so the engine's balance check passes.
+  // ---- 基于锚点的边界解析 ----
+  // 锚点在「当前」surface 上按归一化文本匹配定位 seq，每次调用重新解析；
+  // 匹配到的边缘会被吸附到平衡的 tool-call/result 边界上。
 
-  // normText comes from ./normalize.ts: whitespace-collapsed, CJK full-width
-  // punctuation mapped to half-width, applied to BOTH anchors and node text.
+  // normText 来自 ./normalize.ts：折叠空白、将 CJK 全角标点映射为半角，
+  // 同时应用于锚点与节点文本。
 
-  // Tolerant variant: drop the [tool-call <name>] / [tool-result( error)] markers
-  // the renderer adds, so the model may paste content with or without them.
-  // Routed through normText so punctuation normalization applies here too.
+  // 宽容变体：去掉渲染器添加的 [tool-call <name>] / [tool-result] 标记。
   function strippedText(s: string): string {
     return normText(
       s
@@ -348,15 +265,8 @@ export function apply(ctx: Context, config: Config) {
     )
   }
 
-  // UNIQUE-PREFIX matching: an anchor must be a normalized prefix of EXACTLY
-  // ONE message node (user/message or assistant/message), so a replacement can
-  // never silently land on the wrong node. tool/result nodes are NOT matched:
-  // their caller lives inside the preceding assistant message, so anchoring a
-  // message keeps whole tool pairs together (snap* helpers close the edges).
-  // Zero hits -> "not found" with closest-node hints; more than one hit ->
-  // "ambiguous" listing every candidate so the caller lengthens the anchor.
-  // The current in-flight turn's own tool-call node (its arguments are part of
-  // the surface) is excluded: it is an open, unbalanced step, never a boundary.
+  // 唯一前缀匹配：锚点必须是恰好一个消息节点的归一化前缀，避免静默替换错节点；
+  // tool/result 节点不参与匹配，进行中轮次的 tool-call 节点也被排除。
   function prefixHits(nodes: SurfaceNode[], anchor: string): number[] {
     const a = normText(anchor)
     const hits: number[] = []
@@ -375,7 +285,7 @@ export function apply(ctx: Context, config: Config) {
     return hits.map((i) => 'pos ' + i + ' | seq ' + nodes[i].seq + ' | ' + nodes[i].type + ': ' + preview(nodeText(nodes[i], true), 80)).join('\n')
   }
 
-  // Resolve one anchor to a unique node index, throwing with actionable hints.
+  // 将单个锚点解析为唯一节点下标，解析失败时抛出带有可操作提示的错误。
   function resolveUniqueHit(nodes: SurfaceNode[], anchor: string, side: string): number {
     const hits = prefixHits(nodes, anchor)
     if (hits.length === 1) return hits[0]
@@ -387,8 +297,8 @@ export function apply(ctx: Context, config: Config) {
   }
 
   function snapStartBalanced(nodes: SurfaceNode[], si: number): number {
-    // A tool/result must not open the span without its assistant message:
-    // walk back to the nearest assistant/message that issued the calls.
+    // tool/result 不能在没有其 assistant 消息的情况下作为区间开头：
+    // 向前回退到最近的、发起这些调用的 assistant/message。
     while (si > 0 && nodes[si].type === 'tool/result') {
       let j = si - 1
       while (j > 0 && nodes[j].type !== 'assistant/message') j--
@@ -399,9 +309,9 @@ export function apply(ctx: Context, config: Config) {
   }
 
   function snapEndBalanced(nodes: SurfaceNode[], ei: number): number {
-    // An assistant/message edge stays open while its tool results follow;
-    // consecutive tool/result nodes belong to the same pair, so advance
-    // through ALL of them until the pair is fully closed.
+    // 只要后面还有 tool result，assistant/message 的边缘就保持开放；
+    // 连续的 tool/result 节点属于同一对调用，因此要一直推进穿过它们，
+    // 直到整对完全闭合。
     while (ei < nodes.length - 1 && nodes[ei + 1].type === 'tool/result') {
       ei++
     }
@@ -417,8 +327,8 @@ export function apply(ctx: Context, config: Config) {
     detail: { startPos: number; endPos: number }
   }
 
-  // Rank nodes by word overlap with an anchor, to suggest what to pass when a
-  // match fails. Cheap, deterministic, good enough for a hint.
+  // 按与锚点的词重叠度给节点排序，用于在匹配失败时提示该传什么内容。
+  // 廉价、确定、足以作为提示。
   function anchorOverlap(nodeRaw: string, anchorNorm: string): number {
     const words = anchorNorm.split(' ').filter((w) => w.length > 2)
     if (!words.length) return 0
@@ -444,7 +354,7 @@ export function apply(ctx: Context, config: Config) {
     if (!nodes.length) throw new Error('surface is empty; nothing to compact')
     const startAnchor = typeof args.startAnchor === 'string' && args.startAnchor.trim() ? args.startAnchor : ''
     const endAnchor = typeof args.endAnchor === 'string' && args.endAnchor.trim() ? args.endAnchor : ''
-    // The end side is REQUIRED to bound the span; start defaults to the first node.
+    // 结束侧是「必需」的，用来界定区间；起点默认取第一个节点。
     if (!endAnchor) {
       throw new Error('cannot resolve the end boundary: provide endAnchor — verbatim text that is a UNIQUE PREFIX of the LAST node of the span to compress (that node itself is compressed; use its predecessor to keep it)')
     }
@@ -488,14 +398,8 @@ export function apply(ctx: Context, config: Config) {
     return parts.join('\n\n')
   }
 
-  // Sequential per-session archive numbering. The local spill backend scopes
-  // files under root/session-<hash>/, so the next number is derived from what
-  // is ALREADY in that session dir (max numeric suffix + 1) — clean, gap-free,
-  // and restart-safe. The spill service exposes only saveText (no list API),
-  // so the root is duck-typed off the live LocalSpillStore instance; other
-  // backends without a `root` field degrade to the in-memory counter. No
-  // collision retry is needed: the backend prepends a random hex prefix to
-  // every filename, so two saves can never collide even with equal suffixes.
+  // 按会话顺序编号的归档：从会话 spill 目录已有的最大数字后缀推导下一个编号；
+  // 无 `root` 字段的后端降级为内存计数器。
   const archiveCounters = new Map<string, number>()
 
   function spillRootOf(spillStore: SpillStoreLike): string | null {
@@ -507,7 +411,7 @@ export function apply(ctx: Context, config: Config) {
     return join(root, 'session-' + createHash('sha256').update(sessionId).digest('hex').slice(0, 12))
   }
 
-  // Largest numeric suffix already present in the session's spill dir, or 0.
+  // 会话 spill 目录中已存在的最大数字后缀，不存在则为 0。
   async function maxArchiveNumber(root: string, sessionId: string): Promise<number> {
     try {
       const entries = await readdir(sessionSpillDir(root, sessionId))
@@ -518,7 +422,7 @@ export function apply(ctx: Context, config: Config) {
       }
       return max
     } catch (e) {
-      return 0 // dir missing or unreadable: fall back to the in-memory counter
+      return 0 // 目录缺失或不可读：回退到内存计数器
     }
   }
 
@@ -545,7 +449,7 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
-  // Read the summarization usage from the durable compaction/summary event.
+  // 从持久的 compaction/summary 事件中读取摘要用量。
   function findSummaryUsage(session: SessionLike, compactionId: unknown): JsonValue | null {
     try {
       const events = session.events
@@ -558,20 +462,14 @@ export function apply(ctx: Context, config: Config) {
         }
       }
     } catch (e) {
-      /* ignore */
+      /* 忽略 */
     }
     return null
   }
 
   const disposers: (() => void)[] = []
 
-  // Host-level system-prompt guidance for `context_compact`: this bundle mounts
-  // at host level, so the section lands on the GLOBAL prompt layer and every
-  // session reads it (same reach as the tool itself). Order 118 sits directly
-  // after the per-tool guidance band (100-117), so the proactive-compaction
-  // emphasis is read right after the tool usage sections. systemPrompt is a
-  // declared hard dependency (inject), so it is guaranteed present at apply
-  // time — Cordis parks this plugin until the registry is up.
+  // `context_compact` 的主机级 system-prompt 指引（order 118，全局提示层）。
   const systemPrompt = ctx.get('systemPrompt')
   if (systemPrompt) {
     disposers.push(systemPrompt.section({
@@ -581,31 +479,19 @@ export function apply(ctx: Context, config: Config) {
     }))
   }
 
-  // Reset the growth baseline whenever this session actually compacts — ours
-  // or the automatic engine's, either one means "the surface just got
-  // trimmed, measure growth from here" (same 'compaction/summary' detection
-  // pattern findSummaryUsage uses above).
+  // 会话发生压缩（含自动引擎）时重置增长基线。
   disposers.push(ctx.on('session/event', (session: SessionLike | undefined, event: SessionEventLike) => {
     try {
       if (!session || event.type !== 'compaction/summary') return
       const tokens = occupancyTokensOf(session)
       volumeBaseline.set(session, tokens ?? 0)
     } catch (e) {
-      /* ignore */
+      /* 忽略 */
     }
   }))
 
-  // Live, tail-positioned nudge via systemPrompt.context() — NOT .section():
-  // this becomes the LAST message before the model generates on every step
-  // (see dsh-agent-loop's preStep: `[...claimed, context]`), not a
-  // system-prompt prefix, and a step whose returned text is unchanged from
-  // last step is a total no-op (RuntimeContextProjection.project() only
-  // writes on an actual text change) — so this only touches the KV cache on
-  // the exact steps where growth crosses another config.volumeNudgeTokens
-  // multiple. Deliberately independent of context-window ratio/thresholds —
-  // that is the automatic engine's own job (agent/pre-step pressure
-  // compaction in dsh-compaction-basic); this is a separate, size-based nudge
-  // toward doing it earlier with model-curated judgment.
+  // 通过 systemPrompt.context() 注入尾部实时提示：仅在增长跨过整数倍的那几步
+  // 写入 KV 缓存（文本不变时是完全的 no-op），独立于自动引擎的压力阈值。
   if (systemPrompt) {
     disposers.push(systemPrompt.context({
       name: 'agent-compact:volume-nudge',
@@ -662,8 +548,8 @@ export function apply(ctx: Context, config: Config) {
       const b = resolveBoundaries(nodes, args)
       const startSeq = b.startSeq
       const endSeq = b.endSeq
-      // Hand the agent-written checkpoint to the engine; the patched summarizer
-      // consumes it (one-shot) and skips the LLM call entirely.
+      // 把 agent 编写的检查点交给引擎；被修补的 summarizer 消费它（一次性）
+      // 并完全跳过 LLM 调用。
       {
         const ext = ((engine as unknown as { _externalSummary?: Record<string, string> })._externalSummary ??= {})
         ext[agent.session.id] = args.summary
@@ -690,17 +576,9 @@ export function apply(ctx: Context, config: Config) {
         throw new Error('compaction rejected range [' + startSeq + ',' + endSeq + ']: ' + msg)
       }
       const usage = findSummaryUsage(agent.session, result.compactionId)
-      // Paired cleanup of THIS call: the checkpoint is injected separately, so
-      // the assistant/message carrying this call's tool-call (with the full
-      // summary argument) plus its tool/result would leave the checkpoint text
-      // in the surface twice. The surface protocol only knows append/replace
-      // (no remove), so both nodes are shadowed individually — each replaced by
-      // one tiny placeholder — after the framework has written the result
-      // (post-commit feed). NOTE: tool/call events are NOT surface nodes
-      // (SurfaceEventType is user/assistant/message + tool/result), so the
-      // replace must target the assistant/message node. Only when that message
-      // holds exactly this one tool-call is it safe to shadow (a multi-call
-      // message must keep its other tool calls paired with their results).
+      // 成对清理：检查点是单独注入的，为避免检查点文本在 surface 出现两次，
+      // 将该 tool-call 的 assistant/message 与其 tool/result 各 shadow 为一个
+      // 占位符（仅当该消息恰好只含这一个 tool-call 时才安全）。
       const callId = (exec as { callId?: unknown }).callId
       if (typeof callId === 'string' && callId) {
         const holder = nodes.filter((n) => soleToolCall(n, callId)).pop()
@@ -719,22 +597,17 @@ export function apply(ctx: Context, config: Config) {
             try {
               off()
             } catch (e) {
-              /* ignore */
+              /* 忽略 */
             }
             try {
               const session = agent.session as unknown as { append: (type: string, data: unknown, opts: unknown) => unknown }
               if (!session || typeof session.append !== 'function') return
-              // The listener runs synchronously INSIDE the framework's own
-              // tool/result append publication (`invokeContainedSessionObservers`),
-              // where `entry.appending` is still true — calling session.append
-              // synchronously trips the reentry guard and throws. Defer to the
-              // microtask queue so the current publication fully unwinds first.
+              // 监听器在框架的 tool/result 发布流程内同步执行（appending 仍为
+              // true），同步 append 会触发重入保护；延迟到微任务队列。
               const resultSeq = ev.seq
               const run = () => {
                 try {
-                  // Surface the archive locator so the model can read the raw
-                  // span back: the tool/result that carried it is shadowed below,
-                  // so without this the path would be lost.
+                  // 把归档定位符写进完成消息（承载它的 tool/result 随后被 shadow）。
                   const locText = archived && archived.locator ? String(archived.locator) : ''
                   const freedText = result.shadowedTokenCount !== undefined && result.shadowedTokenCount !== null
                     ? '; freed ~' + String(result.shadowedTokenCount) + ' tokens'
@@ -746,14 +619,8 @@ export function apply(ctx: Context, config: Config) {
                     surfaceOp: { op: 'replace', start: assistantSeq, end: assistantSeq },
                     sourceEventSeqs: [assistantSeq],
                   })
-                  // This second placeholder is the LAST thing the model reads
-                  // before it keeps going — closer to the next decision point
-                  // than any static system-prompt section could be. Reuse that
-                  // slot (previously just "result shadowed") as a self-triggered
-                  // habit reminder instead of a no-op: every successful call
-                  // leaves behind a nudge for the NEXT one, so the model keeps
-                  // managing context on its own initiative rather than needing
-                  // an external pressure threshold or a repeated human request.
+                  // 复用该占位槽位作为自我触发的习惯提醒：每次成功调用都给
+                  // 下一次留下提示，引导模型自主管理上下文。
                   session.append('user/message', createShadowUserMessage('`context_compact` result shadowed. Keep managing context this way on your own: once the next sub-task finishes, an error gets resolved, or a large tool result has been fully digested, compact that span before it goes stale — do not wait to be asked again.'), {
                     surfaceOp: { op: 'replace', start: resultSeq, end: resultSeq },
                     sourceEventSeqs: [resultSeq],
@@ -771,9 +638,7 @@ export function apply(ctx: Context, config: Config) {
           })
         }
       }
-      // Debug/introspection metrics go to the log, never into the model-visible
-      // tool result (DSH tool convention: the execute return IS what the model
-      // sees, so it must stay minimal — see bash/read/goal tools).
+      // 调试指标只进日志，不进入模型可见的工具结果。
       ctx.logger.info('[context_compact] %s span %d..%d (%s), shadowed %d nodes / %s tokens, surface %d -> after, usage=%o', agent.session.id, startSeq, endSeq, b.method, Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs.length : 0, String(result.shadowedTokenCount ?? '?'), nodes.length, usage)
       const out: {
         ok: boolean
@@ -796,7 +661,7 @@ export function apply(ctx: Context, config: Config) {
       try {
         d()
       } catch (e) {
-        /* ignore */
+        /* 忽略 */
       }
     }
   }

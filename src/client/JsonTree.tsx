@@ -27,9 +27,8 @@ function primitiveText(value: JsonValue): string {
 }
 
 /**
- * Small, dependency-free collapsible JSON tree. Deliberately narrower than a
- * full-featured tree viewer (no copy menu, no keyboard roving tabindex) —
- * this panel only needs a readable, click-to-expand structural view.
+ * 小巧、零依赖的可折叠 JSON 树。刻意比功能完整的树查看器更精简（没有复制菜单、
+ * 没有键盘焦点漫游 tabindex）——本面板只需要一个可读的、点击展开的结构视图。
  */
 export function JsonTree(props: { readonly data: JsonValue; readonly initialDepth?: number }): React.ReactElement {
   return React.createElement('div', { className: 'cxpJsonHost', role: 'tree' }, React.createElement(JsonNode, {

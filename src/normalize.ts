@@ -1,17 +1,7 @@
-// Anchor-matching text normalization for context_compact.
-//
-// Matching is UNIQUE-PREFIX: an anchor must be a normalized prefix of exactly
-// one message node. Normalization collapses whitespace and maps CJK full-width
-// punctuation to its half-width form (，→, 、→, 。→. ！→! ？→? ；→; ：→:
-// “”/‘’→quotes （）→() 【】→[] ｛｝→{} ～→~ …→...), so an anchor does not depend
-// on the byte width of the punctuation the user typed — the full-width comma in
-// real message text must not force the model to reproduce U+FF0C exactly.
-//
-// The mapping is applied to BOTH the anchor and the node text, so a mismatch
-// can only come from a real difference in wording, never from punctuation
-// width. Normalization never disambiguates: if two nodes end up sharing the
-// same normalized prefix, the caller still gets an AMBIGUOUS error instead of a
-// silent pick, and zero hits still error with closest-node hints.
+// context_compact 的锚点匹配文本归一化。
+// 匹配采用「唯一前缀」：锚点必须是恰好一个消息节点的归一化前缀。归一化折叠
+// 空白并把 CJK 全角标点映射为半角，同时应用于锚点与节点文本，因此不匹配只
+// 可能来自措辞差异，绝不会来自标点宽度。
 
 const PUNCT_NORM: Record<string, string> = {
   '\u3002': '.', // 。
@@ -37,7 +27,7 @@ const PUNCT_NORM: Record<string, string> = {
   '\u2026': '...', // …
 }
 
-/** Collapse whitespace and map CJK full-width punctuation to half-width. */
+/** 折叠空白，并将 CJK 全角标点映射为半角。 */
 export function normText(s: string): string {
   let out = ''
   for (const c of s) out += PUNCT_NORM[c] ?? c

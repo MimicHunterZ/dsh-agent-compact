@@ -1,53 +1,8 @@
 export const CSS_TAG = '@mimichunterz/agent-compact/ctx-surface.css'
 
-// cxp = "ctx panel" v2 (replaces the old cx1-prefixed hand-copy). Values
-// reference the same --dsw-* design tokens the shipped trajectory panel
-// uses (verified against its real compiled CSS), not hard-coded colors.
-//
-// Bottom clearance: --dsh-trajectory-bottom-clearance is NOT a global
-// variable — the shipped trajectory panel only *defines* it locally on its
-// own ledger element (scoped to that subtree), derived from the truly
-// shared --dsh-composer-height (set on a shared scroller ancestor by the
-// conversation composer via ResizeObserver). Our own cxpLedger sits in a
-// separate DOM subtree, so referencing --dsh-trajectory-bottom-clearance
-// without defining it here always fell back to the CSS default (0px): no
-// space was ever reserved for the floating composer overlay, so the last
-// rows sat underneath it and the pane could never actually scroll to the
-// true bottom. Define the same derived value locally, exactly like
-// trajectory's own ledger does, so cxpTablePane's padding-bottom resolves
-// to a real pixel value instead of silently falling back to 0.
-//
-// Timeline/tag colors: matched byte-for-byte against trajectory's real
-// compiled formulas (dsh-client-ui-trajectory/lib/client.js) instead of the
-// earlier approximations — user=business-primary (unchanged), tool=warn
-// label (unchanged), message now uses the exact
-// `--trajectory-assistant-decoding-color` mix (brand 60% + error-secondary,
-// not the old brand 62% + label-secondary approximation, which read too
-// blue/flat next to trajectory's more violet assistant color), and a new
-// `context` kind (green, state-success-primary 68% + label-secondary) was
-// added for `user/message` rows whose `source.kind !== 'user'` — see
-// surface-utils.ts's rowKind() and ../ctx-surface.ts's `source` field.
-//
-// cxpViewBar/cxpViewToggle/cxpViewAction mirror trajectory's own
-// TrajectoryToolbar.module.css (.fV0t5q_*) pill/toggle look for the
-// Duration/Turns/Calls-equivalent row CtxSurfaceView renders under the main
-// toolbar (kept, not replaced: 刷新/清除选择/压缩此区间/search stay in
-// .cxpToolbar; the new row is purely additive).
-//
-// cxpKindCell: trajectory's own kind slot is right-aligned
-// (`.Y0dWHa_kindSlot{justify-content:flex-end}`) — its badges hug the right
-// edge of the narrow kind column instead of hugging the left edge like the
-// seq column next to it. Match that instead of the browser's default
-// left-aligned <td>.
-//
-// cxpColKind width: first set to 66px to fit the new short badges (see
-// rowLabel), but that forgot the <td>'s own `padding:0 8px` (16px eaten
-// before the badge even starts) — 'ASSISTANT' (widest label) then clipped
-// its last letter with no ellipsis (text-overflow only applies to a text
-// node directly inside the overflow box, not a nested <span>, so it just
-// silently cuts pixels). 84px leaves ~68px for the badge itself, comfortably
-// fitting 'ASSISTANT' at this font-size. letter-spacing bumped .02em ->
-// .035em to match trajectory's own `.Y0dWHa_kindTag` value exactly too.
+// cxp = "ctx panel" v2。颜色值引用与官方 trajectory 面板一致的 --dsw-* 设计
+// token。注意：--dsh-trajectory-bottom-clearance 需在本地定义（官方面板只在
+// 自己的子树内定义它），否则 cxpTablePane 的底部留白会回退为 0。
 export const CSS = `
 .cxpRoot{--dsh-trajectory-toolbar-height:34px;box-sizing:border-box;width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;display:flex;overflow:hidden}
 .cxpToolbar{box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2);flex:none;align-items:center;gap:6px;height:var(--dsh-trajectory-toolbar-height);padding:0 10px;display:flex}
