@@ -13,7 +13,7 @@ type DisplayItem =
   | { readonly kind: 'summary'; readonly key: string; readonly count: number }
 
 export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
-  const { sessionId, readSurface, inputActions } = props
+  const { sessionId, readSurface, inputActions, useSession } = props
   const [rows, setRows] = React.useState<readonly CtxSurfaceRow[]>(EMPTY_ROWS)
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
@@ -55,7 +55,12 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
     }).finally(() => setLoading(false))
   }, [sessionId, readSurface])
 
-  React.useEffect(() => { load() }, [load, refreshTick])
+  // 与官方 trajectory 面板同源的自动刷新信号：useSession 订阅的是会话快照，
+  // 这里只取 chat.order 的长度（surface 上出现新节点就会变化）。和
+  // refreshTick 合用一个 effect——分成两个 effect 会导致挂载时各触发一次
+  // load()，多打一次不必要的 RPC。
+  const surfaceGrowth = useSession((snapshot) => snapshot.chat?.order?.length ?? 0)
+  React.useEffect(() => { load() }, [load, refreshTick, surfaceGrowth])
 
   const handleSelect = React.useCallback((idx: number) => {
     setDetailIdx(idx)
