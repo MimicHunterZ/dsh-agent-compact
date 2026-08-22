@@ -105,7 +105,6 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
     return rows.filter((r) => r.text.toLowerCase().includes(q) || String(r.seq).includes(q))
   }, [rows, searchQuery])
 
-  const totalChars = React.useMemo(() => rows.reduce((a, r) => a + r.chars, 0), [rows])
   const span = startIdx !== null && endIdx !== null ? { lo: Math.min(startIdx, endIdx), hi: Math.max(startIdx, endIdx) } : null
 
   const tlWidths = React.useMemo(() => {
@@ -226,9 +225,7 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
         onClick: handleCompress,
         disabled: span === null,
       }, '压缩此区间'),
-      React.createElement('span', { className: 'cxpToolbarStats' },
-        'sid ' + sessionId.slice(0, 10) + ' · ' + rows.length + ' 条 · ' + totalChars + ' 字'
-        + (rows.length ? ' · seq ' + rows[0].seq + '–' + rows[rows.length - 1].seq : '')),
+      React.createElement('span', { className: 'cxpToolbarStats' }, rows.length + ' 条'),
       React.createElement('input', {
         className: 'cxpToolbarSearch',
         placeholder: '搜索',
