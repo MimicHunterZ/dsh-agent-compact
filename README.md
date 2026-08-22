@@ -51,6 +51,7 @@ If the plugin was additionally mounted through a row in the profile's `cordis.pa
 | field | default | meaning |
 |---|---|---|
 | `autoArchive` | `true` | `context_compact` saves the full raw span to a spill artifact before replacing it |
+| `volumeNudgeTokens` | `50000` | Every time accumulated surface growth (heuristic token count) since the last compaction crosses another multiple of this amount, remind the model to consider `context_compact`. `0` disables the nudge. |
 
 Pass through the inserted row in the profile's `cordis.patch.yml` or a bundle patch.
 
@@ -64,7 +65,7 @@ Pass through the inserted row in the profile's `cordis.patch.yml` or a bundle pa
 
 ## Compatibility
 
-- Built and verified against DeepSeek Harness `0.1.0-rc.8` (`@deepseek-ai/dsh-compaction-basic@0.1.0-rc.8`).
+- Built and verified against DeepSeek Harness `0.1.1-rc.2` (`@deepseek-ai/dsh-compaction-basic@0.1.1-rc.2`).
 - Only **one compaction per session at a time** (the engine transaction is serialized); anchors re-resolve on every call, so later compactions never go stale after earlier checkpoints replaced old nodes.
 - With a local spill backend the root is fixed; other backends degrade gracefully (no `root` field → in-memory counter), and compaction itself is unaffected.
 

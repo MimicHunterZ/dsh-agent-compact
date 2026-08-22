@@ -30,7 +30,7 @@ export const TYPERT = {
         typeSymbol: '@mimichunterz/agent-compact/ctx-surface#CtxSurfaceReadResult',
         schema: result$schema,
       },
-      sourceLocation: { file: 'src/ctx-surface.ts', line: 160, column: 3 },
+      sourceLocation: { file: 'src/ctx-surface.ts', line: 225, column: 3 },
     },
   ],
   model: {

@@ -1,10 +1,14 @@
 {
   "name": "@mimichunterz/agent-compact",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Context compression tool (context_compact): the agent writes the replacement checkpoint itself and hands it to the host compaction engine, which skips the LLM summarizer call; automatic compaction stays on the official engine.",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MimicHunterZ/dsh-agent-compact.git"
+  },
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
@@ -27,17 +31,17 @@
   },
   "files": [
     "lib",
-    "src",
     "cordis.patch.yml",
     "README.md",
     "README.zh-CN.md",
     "LICENSE",
-    "docs",
     "tsconfig.json"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },
   "dsh": {
@@ -53,29 +57,30 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/dsh-typert-protocol": "0.1.0-rc.8",
     "@deepseek-ai/schemastery": "^3.18.1",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-compaction-basic": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-typert-protocol": "0.1.0-rc.8"
+    "@deepseek-ai/dsh-compaction-basic": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": "0.1.1-rc.2"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-agent": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-compaction": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-compaction-basic": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-llm": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-session": "^0.1.0-rc.8",
-    "@deepseek-ai/dsh-tools": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-agent": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-api-remotes": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-compaction": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-compaction-basic": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-session": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": "0.1.1-rc.2",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@types/node": "^26.2.0",
     "@types/react": "^18.3.31",
     "esbuild": "^0.28.2",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "keywords": [
     "deepseek-harness",

@@ -315,7 +315,7 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
                           return React.createElement('tr', {
                             key: item.key,
                             className: 'cxpSummaryRow',
-                            ref: (el: HTMLTableRowElement | null) => {
+                            ref: (el: HTMLTableRowElement | null): void => {
                               if (el) rowElRefs.current.set(item.key, el)
                               else rowElRefs.current.delete(item.key)
                             },
@@ -333,7 +333,7 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
                         return React.createElement('tr', {
                           key: row.seq,
                           className: 'cxpTblRow',
-                          ref: (el: HTMLTableRowElement | null) => {
+                          ref: (el: HTMLTableRowElement | null): void => {
                             const key = 'row-' + globalIdx
                             if (el) rowElRefs.current.set(key, el)
                             else rowElRefs.current.delete(key)

@@ -12,6 +12,7 @@ import { createShadowUserMessage } from './shadow-message.js'
 import { patchEngine } from './optimizer.js'
 import { normText } from './normalize.js'
 import { CtxSurfaceService } from './ctx-surface.js'
+import { resolveBoundaries, soleToolCall, spanText } from './boundary.js'
 import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode } from './optimizer.js'
 
 export const name = 'tool-context-compression'
@@ -25,7 +26,7 @@ export interface Config {
 
 export const Config: Schema<Config> = Schema.object({
   autoArchive: Schema.boolean().default(true).description('context_compact saves the full raw span to a spill artifact before replacing it.'),
-  volumeNudgeTokens: Schema.number().default(20000).description('Every time accumulated tool-result output (heuristic token count) since the last compaction crosses another multiple of this amount, remind the model to consider context_compact. Set to 0 to disable.'),
+  volumeNudgeTokens: Schema.number().default(50000).description('Every time accumulated tool-result output (heuristic token count) since the last compaction crosses another multiple of this amount, remind the model to consider context_compact. Set to 0 to disable.'),
 })
 
 export function apply(ctx: Context, config: Config) {
@@ -77,12 +78,6 @@ export function apply(ctx: Context, config: Config) {
     compactRegion(start: number, end: number, agent: AgentWithSession, signal?: AbortSignal): Promise<CompactionResultLike>
   }
 
-  interface SurfaceNodeData {
-    message?: { content?: unknown } | null
-    content?: unknown
-    error?: { code?: unknown } | null
-  }
-
   interface SessionEventLike {
     type?: string
     seq?: number
@@ -90,29 +85,6 @@ export function apply(ctx: Context, config: Config) {
     sourceEventSeqs?: unknown
   }
 
-  // 恰好携带这一个 tool-call 的 assistant/message 节点（用于判断该调用所属的
-  // 消息节点能否被 shadow，而不破坏同一条消息里的其他兄弟 tool-call）。
-  function soleToolCall(n: SurfaceNode, callId: string): boolean {
-    if (n.type !== 'assistant/message') return false
-    const content = (n.data as { message?: { content?: unknown } } | undefined)?.message?.content
-    if (!Array.isArray(content)) return false
-    const calls = content.filter((b) => {
-      const block = b as { type?: unknown; id?: unknown }
-      return block !== null && typeof block === 'object' && block.type === 'tool-call'
-    })
-    return calls.length === 1 && (calls[0] as { id?: unknown }).id === callId
-  }
-
-  interface AnyBlock {
-    type?: string
-    text?: unknown
-    name?: unknown
-    arguments?: unknown
-    isError?: unknown
-    content?: unknown
-  }
-
-  // ---- volume-nudge：冷启动的主动压缩提醒 ----
   // 用会话占用量的增长量作为提醒信号：自上次压缩以来增长每跨过
   // config.volumeNudgeTokens 的一个整数倍，就提示模型考虑压缩。
   // 度量指标按优先级：
@@ -185,217 +157,11 @@ export function apply(ctx: Context, config: Config) {
     return agent as AgentWithSession
   }
 
-  // ---- surface 文本提取 ----
-  function nodeContent(n: SurfaceNode): unknown {
-    const d = (n.data as SurfaceNodeData | undefined) ?? null
-    if (!d) return null
-    const t = n.type
-    if (t === 'assistant/message' || t === 'tool/result') {
-      const m = d.message
-      if (m && Array.isArray(m.content)) return m.content
-      return null
-    }
-    if (Array.isArray(d.content)) return d.content
-    return null
-  }
-
-  // skipReasoning：让锚点匹配文本与模型所见对齐（跳过 reasoning 与图片块）；
-  // 归档（skipReasoning = false）保留完整原文。
-  function blockText(b: unknown, depth: number, skipReasoning: boolean): string {
-    if (depth > 5 || !b || typeof b !== 'object') return ''
-    const blk = b as AnyBlock
-    if (skipReasoning && blk.type === 'reasoning') return ''
-    if (skipReasoning && blk.type === 'image') return ''
-    if (typeof blk.text === 'string') return blk.text
-    if (blk.type === 'tool-call') {
-      return '[tool-call ' + String(blk.name ?? '') + '] ' + (typeof blk.arguments === 'string' ? blk.arguments : '')
-    }
-    if (blk.type === 'tool-result') {
-      return '[tool-result' + (blk.isError ? ' error' : '') + '] ' + blocksText(blk.content, depth + 1, skipReasoning)
-    }
-    if (blk.type === 'image') return '[image]'
-    if (Array.isArray(blk.content)) return blocksText(blk.content, depth + 1, skipReasoning)
-    return ''
-  }
-
-  function blocksText(blocks: unknown, depth: number, skipReasoning: boolean): string {
-    if (!Array.isArray(blocks)) return ''
-    let out = ''
-    for (const b of blocks) out += blockText(b, depth, skipReasoning) + '\n'
-    return out
-  }
-
-  function nodeText(n: SurfaceNode, skipReasoning?: boolean): string {
-    const blocks = nodeContent(n)
-    if (!blocks) return ''
-    return blocksText(blocks, 0, skipReasoning ?? false).replace(/\n+$/, '')
-  }
-
-  function nodeErrorTag(n: SurfaceNode): string {
-    const d = (n.data as SurfaceNodeData | undefined) ?? null
-    if (d && d.error && d.error.code) return ' error=' + String(d.error.code)
-    return ''
-  }
-
-  function preview(text: unknown, max: number): string {
-    const t = String(text || '')
-    return t.length <= max ? t : t.slice(0, max) + '…'
-  }
-
   async function readSurfaceNodes(agent: AgentWithSession): Promise<SurfaceNode[] | null> {
     const sessionQuery = resolveService(agent, 'sessionQuery') as SessionQueryLike | undefined
     if (!sessionQuery) return null
     const snap = await sessionQuery.readSurface(agent.session.id)
     return snap && Array.isArray(snap.events) ? (snap.events as SurfaceNode[]) : []
-  }
-
-  // ---- 基于锚点的边界解析 ----
-  // 锚点在「当前」surface 上按归一化文本匹配定位 seq，每次调用重新解析；
-  // 匹配到的边缘会被吸附到平衡的 tool-call/result 边界上。
-
-  // normText 来自 ./normalize.ts：折叠空白、将 CJK 全角标点映射为半角，
-  // 同时应用于锚点与节点文本。
-
-  // 宽容变体：去掉渲染器添加的 [tool-call <name>] / [tool-result] 标记。
-  function strippedText(s: string): string {
-    return normText(
-      s
-        .replace(/\[tool-call\s+[^\]]*\]\s*/g, '')
-        .replace(/\[tool-result(?:\s+error)?\]\s*/g, ''),
-    )
-  }
-
-  // 唯一前缀匹配：锚点必须是恰好一个消息节点的归一化前缀，避免静默替换错节点；
-  // tool/result 节点不参与匹配，进行中轮次的 tool-call 节点也被排除。
-  function prefixHits(nodes: SurfaceNode[], anchor: string): number[] {
-    const a = normText(anchor)
-    const hits: number[] = []
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i]
-      if (node.type !== 'user/message' && node.type !== 'assistant/message') continue
-      if (i === nodes.length - 1 && /\[tool-call/.test(nodeText(node, true))) continue
-      const n = normText(nodeText(node, true))
-      const s = strippedText(nodeText(node, true))
-      if (n.startsWith(a) || s.startsWith(a)) hits.push(i)
-    }
-    return hits
-  }
-
-  function hitPreview(nodes: SurfaceNode[], hits: number[]): string {
-    return hits.map((i) => 'pos ' + i + ' | seq ' + nodes[i].seq + ' | ' + nodes[i].type + ': ' + preview(nodeText(nodes[i], true), 80)).join('\n')
-  }
-
-  // 将单个锚点解析为唯一节点下标，解析失败时抛出带有可操作提示的错误。
-  function resolveUniqueHit(nodes: SurfaceNode[], anchor: string, side: string): number {
-    const hits = prefixHits(nodes, anchor)
-    if (hits.length === 1) return hits[0]
-    if (hits.length === 0) {
-      const hint = nearestHint(nodes, normText(anchor))
-      throw new Error(side + ' not found on the surface: ' + preview(anchor, 120) + (hint ? '\nclosest nodes:\n' + hint : ''))
-    }
-    throw new Error(side + ' is AMBIGUOUS: ' + hits.length + ' nodes start with it. Lengthen the anchor to pick one:\n' + hitPreview(nodes, hits))
-  }
-
-  function snapStartBalanced(nodes: SurfaceNode[], si: number): number {
-    // tool/result 不能在没有其 assistant 消息的情况下作为区间开头：
-    // 向前回退到最近的、发起这些调用的 assistant/message。
-    while (si > 0 && nodes[si].type === 'tool/result') {
-      let j = si - 1
-      while (j > 0 && nodes[j].type !== 'assistant/message') j--
-      if (nodes[j].type !== 'assistant/message') break
-      si = j
-    }
-    return si
-  }
-
-  function snapEndBalanced(nodes: SurfaceNode[], ei: number): number {
-    // 只要后面还有 tool result，assistant/message 的边缘就保持开放；
-    // 连续的 tool/result 节点属于同一对调用，因此要一直推进穿过它们，
-    // 直到整对完全闭合。
-    while (ei < nodes.length - 1 && nodes[ei + 1].type === 'tool/result') {
-      ei++
-    }
-    return ei
-  }
-
-  interface BoundaryResolveResult {
-    si: number
-    ei: number
-    startSeq: number
-    endSeq: number
-    method: string
-    detail: { startPos: number; endPos: number }
-  }
-
-  // 按与锚点的词重叠度给节点排序，用于在匹配失败时提示该传什么内容。
-  // 廉价、确定、足以作为提示。
-  function anchorOverlap(nodeRaw: string, anchorNorm: string): number {
-    const words = anchorNorm.split(' ').filter((w) => w.length > 2)
-    if (!words.length) return 0
-    const n = normText(nodeRaw)
-    let hit = 0
-    for (const w of words) {
-      if (n.includes(w)) hit++
-    }
-    return hit / words.length
-  }
-
-  function nearestHint(nodes: SurfaceNode[], anchorNorm: string): string {
-    const scored = nodes
-      .map((n, i) => ({ i: i, score: anchorOverlap(nodeText(n, true), anchorNorm) }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3)
-      .filter((s) => s.score > 0)
-    if (!scored.length) return ''
-    return scored.map((s) => 'pos ' + s.i + ' | seq ' + nodes[s.i].seq + ' | ' + nodes[s.i].type + ': ' + preview(nodeText(nodes[s.i], true), 80)).join('\n')
-  }
-
-  function resolveBoundaries(nodes: SurfaceNode[], args: { startAnchor?: unknown; endAnchor?: unknown }): BoundaryResolveResult {
-    if (!nodes.length) throw new Error('surface is empty; nothing to compact')
-    const startAnchor = typeof args.startAnchor === 'string' && args.startAnchor.trim() ? args.startAnchor : ''
-    const endAnchor = typeof args.endAnchor === 'string' && args.endAnchor.trim() ? args.endAnchor : ''
-    // 结束侧是「必需」的，用来界定区间；起点默认取第一个节点。
-    if (!endAnchor) {
-      throw new Error('cannot resolve the end boundary: provide endAnchor — verbatim text that is a UNIQUE PREFIX of the LAST node of the span to compress (that node itself is compressed; use its predecessor to keep it)')
-    }
-    const method: string[] = []
-    let si: number
-    if (startAnchor) {
-      si = resolveUniqueHit(nodes, startAnchor, 'startAnchor')
-      method.push('start=anchor')
-    } else {
-      si = 0
-      method.push('start=first')
-    }
-    let ei = resolveUniqueHit(nodes, endAnchor, 'endAnchor')
-    method.push('end=anchor')
-    if (si > ei) {
-      throw new Error('resolved start sits after resolved end on the surface (start pos ' + si + ', end pos ' + ei + ')')
-    }
-    const snappedStart = snapStartBalanced(nodes, si)
-    const snappedEnd = snapEndBalanced(nodes, ei)
-    if (snappedStart !== si) method.push('start-snapped')
-    if (snappedEnd !== ei) method.push('end-snapped')
-    si = snappedStart
-    ei = snappedEnd
-    if (si > ei) throw new Error('after balancing, start sits after end on the surface (start pos ' + si + ', end pos ' + ei + ')')
-    return {
-      si: si,
-      ei: ei,
-      startSeq: nodes[si].seq,
-      endSeq: nodes[ei].seq,
-      method: method.join(' + '),
-      detail: { startPos: si, endPos: ei },
-    }
-  }
-
-  function spanText(nodes: SurfaceNode[], si: number, ei: number): string {
-    const parts: string[] = []
-    for (let i = si; i <= ei; i++) {
-      const n = nodes[i]
-      parts.push('--- seq ' + n.seq + ' | pos ' + i + ' | ' + n.type + nodeErrorTag(n) + ' ---\n' + nodeText(n))
-    }
-    return parts.join('\n\n')
   }
 
   // 按会话顺序编号的归档：从会话 spill 目录已有的最大数字后缀推导下一个编号；
@@ -438,7 +204,7 @@ export function apply(ctx: Context, config: Config) {
       owner: { sessionId: sid },
       source: { toolName: 'context_compact', callId: null, label: 'auto-archive' },
       suggestedName: String(n).padStart(6, '0') + '.txt',
-      content: content,
+      content,
     })
     return {
       locator: ref.locator,
@@ -531,7 +297,31 @@ export function apply(ctx: Context, config: Config) {
       summary: { type: 'string', description: 'Required. The full Markdown checkpoint replacing the span, written by you from the conversation; never verbatim. Per-scene structure as in the description; must be smaller than the compressed content.' },
     },
     output: {
-      schema: { type: 'object', additionalProperties: true },
+      // 显式声明真实字段（而非开放的 additionalProperties:true 空对象），
+      // 使 Code Mode 的 ToolOutputMap 能推导出这个工具的真实返回类型。
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true, description: 'Always true on a successful call (a failure throws instead).' },
+          archived: {
+            required: true,
+            oneOf: [
+              { type: 'null' },
+              {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  locator: { type: 'json', required: true, description: 'Opaque spill-store locator for the archived raw span.' },
+                  retrievalHint: { type: 'json', required: true, description: 'Backend-specific hint for retrieving the archived span.' },
+                },
+              },
+            ],
+            description: 'Archive record when the raw span was saved, or null when it was not.',
+          },
+          archiveError: { type: 'string', description: 'Present only when autoArchive was requested but archiving failed; compaction still succeeded.' },
+        },
+      },
       render(args, value) { return [{ type: 'text', text: JSON.stringify(value) }] },
     },
     async execute(args, exec) {

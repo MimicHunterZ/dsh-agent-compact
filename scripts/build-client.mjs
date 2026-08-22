@@ -32,7 +32,10 @@ const schemaBlock = ctxSurfaceSrc
 if (!schemaBlock.includes('_ctxSurface_read_result$schema')) throw new Error('schema extraction failed: result$schema rename missed')
 
 // ---- 1. 从 dsh-api-remotes 提取内联的 zod 4.4.3 区段 ----
-const apiRemotesPath = '/Users/mimiczhang/.nvm/versions/node/v24.15.0/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-remotes/lib/client.js'
+// 走 Node 包导出解析（而非某个人机器上的绝对路径）：只要 devDependencies 装好，
+// 在 `npm run build`、`prepare`（git 安装自建）、CI、任何开发者机器上都能定位到
+// 同一份文件，见 docs/user/develop/basic/publish.md 对 `prepare` 自包含性的要求。
+const apiRemotesPath = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-api-remotes/client'))
 const apiRemotes = readFileSync(apiRemotesPath, 'utf8').split('\n')
 const zodStart = apiRemotes.findIndex((l) => l.includes('//#region') && l.includes('zod/v4/core/core.js'))
 const schemasRegion = apiRemotes.findIndex((l) => l.includes('zod/v4/classic/schemas.js'))
@@ -92,7 +95,7 @@ const tail = `
 					typeSymbol: '@mimichunterz/agent-compact/ctx-surface#CtxSurfaceReadResult',
 					schema: _ctxSurface_read_result$schema,
 				},
-				sourceLocation: { file: 'src/ctx-surface.ts', line: 160, column: 3 },
+				sourceLocation: { file: 'src/ctx-surface.ts', line: 225, column: 3 },
 			}],
 		}
 		//#endregion

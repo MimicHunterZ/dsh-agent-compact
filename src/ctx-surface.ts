@@ -5,6 +5,7 @@
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
+import { blockText, blocksText, nodeContent } from './surface-text.js'
 
 // ---- 线上类型（schema 为唯一源头，host/client 描述符直接复用；类型由 schema
 // 推导。下面的 schema 定义区段会被 scripts/build-client.mjs 提取进浏览器 bundle，
@@ -76,68 +77,10 @@ interface AnyBlock {
 const TEXT_MAX = 8000
 const BLOCKS_MAX = 20
 
-function nodeContent(n: SurfaceNodeLike): unknown {
-  const d = (n.data as SurfaceNodeData | undefined) ?? null
-  if (!d) return null
-  const t = n.type
-  if (t === 'assistant/message' || t === 'tool/result') {
-    const m = d.message
-    if (m && Array.isArray(m.content)) return m.content
-    return null
-  }
-  if (Array.isArray(d.content)) return d.content
-  return null
-}
-
-// skipReasoning：面板文本与模型视角及锚点匹配文本对齐（跳过 reasoning）。
-// maxLen 限制拼接长度，避免撑爆 RPC 载荷；chars 是完整块文本的纯长度计数。
-// dropImages：仅用于构建行内扁平 `text`（锚点来源），去掉图片标记；不影响
-// `row.blocks` 中逐块的条目。
-function blockText(b: unknown, depth: number, skipReasoning: boolean, maxLen: number, dropImages?: boolean): { text: string; chars: number } {
-  if (depth > 5 || !b || typeof b !== 'object') return { text: '', chars: 0 }
-  const blk = b as AnyBlock
-  if (skipReasoning && blk.type === 'reasoning') return { text: '', chars: 0 }
-  if (typeof blk.text === 'string') {
-    return { text: truncate(blk.text, maxLen), chars: blk.text.length }
-  }
-  if (blk.type === 'tool-call') {
-    const raw = '[tool-call ' + String(blk.name ?? '') + '] ' + (typeof blk.arguments === 'string' ? blk.arguments : '')
-    return { text: truncate(raw, maxLen), chars: raw.length }
-  }
-  if (blk.type === 'tool-result') {
-    const inner = blocksText(blk.content, depth + 1, skipReasoning, maxLen, dropImages)
-    const raw = '[tool-result' + (blk.isError ? ' error' : '') + '] ' + inner.text
-    return { text: truncate(raw, maxLen), chars: inner.chars + 1 }
-  }
-  if (blk.type === 'image') return dropImages ? { text: '', chars: 0 } : { text: '[image]', chars: 7 }
-  if (Array.isArray(blk.content)) {
-    const inner = blocksText(blk.content, depth + 1, skipReasoning, maxLen, dropImages)
-    return { text: inner.text, chars: inner.chars }
-  }
-  return { text: '', chars: 0 }
-}
-
-function blocksText(blocks: unknown, depth: number, skipReasoning: boolean, maxLen: number, dropImages?: boolean): { text: string; chars: number } {
-  if (!Array.isArray(blocks)) return { text: '', chars: 0 }
-  let out = ''
-  let chars = 0
-  let remain = maxLen
-  for (const b of blocks) {
-    const part = blockText(b, depth, skipReasoning, remain, dropImages)
-    if (part.chars > 0) {
-      chars += part.chars
-      if (part.text.length > 0) {
-        out += part.text + '\n'
-        remain = Math.max(0, maxLen - out.length)
-      }
-    }
-  }
-  return { text: out, chars }
-}
-
-function truncate(s: string, maxLen: number): string {
-  return s.length <= maxLen ? s : s.slice(0, maxLen)
-}
+// nodeContent/blockText/blocksText 来自 ./surface-text.ts：与锚点匹配
+// （src/index.ts）共用同一套 surface 节点→文本遍历逻辑，避免两处各自维护、
+// 悄悄漂移。面板这里用 `{ skipReasoning: true, dropImages: true }` 且带截断
+// 预算；锚点匹配那边用同一函数、不截断、且 dropImages 与 skipReasoning 同步。
 
 function kindOf(b: unknown): CtxSurfaceBlock['kind'] {
   const blk = b as AnyBlock
@@ -180,19 +123,20 @@ function rowOf(n: SurfaceNodeLike): CtxSurfaceRow | null {
     let remain = TEXT_MAX
     for (const b of content) {
       if (blocks.length >= BLOCKS_MAX) break
-      const part = blockText(b, 0, true, remain)
+      const part = blockText(b, 0, { skipReasoning: true }, remain)
       if (part.chars === 0 && part.text.length === 0) continue
+      const label = blockLabel(b)
       const block: CtxSurfaceBlock = {
         kind: kindOf(b),
         text: part.text,
         chars: part.chars,
-        ...(blockLabel(b) !== undefined ? { label: blockLabel(b) as string } : {}),
+        ...(label !== undefined ? { label } : {}),
       }
       blocks.push(block)
       remain = Math.max(0, TEXT_MAX - blocks.reduce((acc, blk) => acc + blk.text.length, 0))
     }
   }
-  const flat = blocksText(content, 0, true, TEXT_MAX, true)
+  const flat = blocksText(content, 0, { skipReasoning: true, dropImages: true }, TEXT_MAX)
   const source = sourceKindOf(n)
   return {
     seq,

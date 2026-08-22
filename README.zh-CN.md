@@ -51,6 +51,7 @@ dsh plugin --profile web remove @mimichunterz/agent-compact
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `autoArchive` | `true` | `context_compact` 在替换区间前先把原始区间全文存到 spill 归档 |
+| `volumeNudgeTokens` | `50000` | 自上次压缩以来累积的表面增长量（启发式 token 计数）每跨过这个数值的一个整数倍，就提醒模型考虑 `context_compact`。设为 `0` 可关闭提醒。 |
 
 通过 profile 的 `cordis.patch.yml` 或 bundle patch 插入行来配置。
 
@@ -64,7 +65,7 @@ dsh plugin --profile web remove @mimichunterz/agent-compact
 
 ## 兼容性
 
-- 针对 DeepSeek Harness `0.1.0-rc.8`(`@deepseek-ai/dsh-compaction-basic@0.1.0-rc.8`)构建与验证。
+- 针对 DeepSeek Harness `0.1.1-rc.2`(`@deepseek-ai/dsh-compaction-basic@0.1.1-rc.2`)构建与验证。
 - 每个会话**同一时刻只允许一次压缩**(引擎事务串行);锚点每次重新解析,重复压缩不会因之前的检查点而过期。
 - 本地 spill 后端固定 root;换用其他后端时归档功能按可用性降级(无 `root` 字段则回退内存计数),压缩本身不受影响。
 
