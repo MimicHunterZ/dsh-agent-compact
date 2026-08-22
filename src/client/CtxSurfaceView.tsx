@@ -21,7 +21,6 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
   const [endIdx, setEndIdx] = React.useState<number | null>(null)
   const [detailIdx, setDetailIdx] = React.useState<number | null>(null)
   const [searchQuery, setSearchQuery] = React.useState('')
-  const [refreshTick, setRefreshTick] = React.useState(0)
   const [detailsWidth, setDetailsWidth] = React.useState(DEFAULT_DETAILS_WIDTH)
   const resizeStartRef = React.useRef<{ startX: number; startWidth: number } | null>(null)
 
@@ -58,11 +57,9 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
   }, [sessionId, readSurface])
 
   // 与官方 trajectory 面板同源的自动刷新信号：useSession 订阅的是会话快照，
-  // 这里只取 chat.order 的长度（surface 上出现新节点就会变化）。和
-  // refreshTick 合用一个 effect——分成两个 effect 会导致挂载时各触发一次
-  // load()，多打一次不必要的 RPC。
+  // 这里只取 chat.order 的长度（surface 上出现新节点就会变化）。
   const surfaceGrowth = useSession((snapshot) => snapshot.chat?.order?.length ?? 0)
-  React.useEffect(() => { load() }, [load, refreshTick, surfaceGrowth])
+  React.useEffect(() => { load() }, [load, surfaceGrowth])
 
   const handleSelect = React.useCallback((idx: number) => {
     setDetailIdx(idx)
@@ -108,6 +105,14 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
   }, [rows, searchQuery])
 
   const span = startIdx !== null && endIdx !== null ? { lo: Math.min(startIdx, endIdx), hi: Math.max(startIdx, endIdx) } : null
+
+  // 选中区间的估算 token 总量（每行 row.tokens 加总，非真实计费值）。
+  const selectedTokens = React.useMemo(() => {
+    if (span === null) return null
+    let total = 0
+    for (let i = span.lo; i <= span.hi; i += 1) total += rows[i]?.tokens ?? 0
+    return total
+  }, [span, rows])
 
   const tlWidths = React.useMemo(() => {
     const n = filtered.length
@@ -229,7 +234,6 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
 
   return React.createElement('div', { className: 'cxpRoot', 'data-conversation-composer-overlay': '' },
     React.createElement('div', { className: 'cxpToolbar' },
-      React.createElement('button', { className: 'cxpToolbarBtn', onClick: () => setRefreshTick((t) => t + 1) }, '刷新'),
       React.createElement('button', {
         className: 'cxpToolbarBtn',
         onClick: clearSelection,
@@ -240,7 +244,9 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
         onClick: handleCompress,
         disabled: span === null,
       }, '压缩此区间'),
-      React.createElement('span', { className: 'cxpToolbarStats' }, rows.length + ' 条'),
+      React.createElement('span', { className: 'cxpToolbarStats' },
+        rows.length + ' 条'
+        + (span !== null ? ' · 已选 ' + (span.hi - span.lo + 1) + ' 行 · 约 ' + selectedTokens + ' tok' : '')),
       React.createElement('input', {
         className: 'cxpToolbarSearch',
         placeholder: '搜索',

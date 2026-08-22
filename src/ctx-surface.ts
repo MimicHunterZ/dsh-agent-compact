@@ -28,6 +28,9 @@ export const row$schema = z.object({
   type: z.string().readonly(),
   text: z.string().readonly(),
   chars: z.number().readonly(),
+  // 估算 token 数（chars/4+4 启发式，非真实计费值）。可选：宿主进程不热重载，
+  // 客户端 bundle 会，两端存在更新窗口期。
+  tokens: z.number().readonly().optional(),
   blocks: z.array(block$schema).readonly(),
   // `user/message` 事件上的原始 `data.source.kind`，用于区分真实用户轮次与
   // 合成注入的 "context" 行（与官方 trajectory 面板的判定一致）。
@@ -76,6 +79,15 @@ interface AnyBlock {
 
 const TEXT_MAX = 8000
 const BLOCKS_MAX = 20
+
+// 估算 token 的启发式常数，照抄 @deepseek-ai/dsh-token-meter（chars/4 + 每条
+// 消息 +4），与宿主压缩提醒的口径一致。用未截断的 flat.chars 本地算即可。
+const TOKEN_CHARS_PER_TOKEN = 4
+const TOKEN_MESSAGE_OVERHEAD = 4
+
+function estimateTokensFromChars(chars: number): number {
+  return Math.ceil(chars / TOKEN_CHARS_PER_TOKEN) + TOKEN_MESSAGE_OVERHEAD
+}
 
 // nodeContent/blockText/blocksText 来自 ./surface-text.ts：与锚点匹配
 // （src/index.ts）共用同一套 surface 节点→文本遍历逻辑，避免两处各自维护、
@@ -143,6 +155,7 @@ function rowOf(n: SurfaceNodeLike): CtxSurfaceRow | null {
     type,
     text: flat.text.replace(/\n+$/, ''),
     chars: flat.chars,
+    tokens: estimateTokensFromChars(flat.chars),
     blocks,
     ...(source !== undefined ? { source } : {}),
   }

@@ -12,6 +12,9 @@ export interface CtxSurfaceRow {
   readonly type: string
   readonly text: string
   readonly chars: number
+  // 估算 token 数（启发式，非真实计费值）。可选：宿主进程不热重载、客户端会，
+  // 两端有更新窗口期，必需字段会让校验整体失败。
+  readonly tokens?: number
   readonly blocks: readonly CtxSurfaceBlock[]
   // 镜像 ../ctx-surface.ts：原始 `data.source.kind`，区分真实用户轮次与
   // 合成注入的 "context" 行。
