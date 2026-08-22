@@ -56,8 +56,7 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
     }).finally(() => setLoading(false))
   }, [sessionId, readSurface])
 
-  // 与官方 trajectory 面板同源的自动刷新信号：useSession 订阅的是会话快照，
-  // 这里只取 chat.order 的长度（surface 上出现新节点就会变化）。
+  // 自动刷新信号：useSession 订阅会话快照，chat.order 长度变化即有新节点。
   const surfaceGrowth = useSession((snapshot) => snapshot.chat?.order?.length ?? 0)
   React.useEffect(() => { load() }, [load, surfaceGrowth])
 
@@ -191,10 +190,8 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
     return { displayItems: items, domKeyOf }
   }, [filtered, rows, turnsCollapsed, callsCollapsed, expandedKeys])
 
-  // 挂载后首次加载完就跳到最底部（最新一行）——和官方轨迹面板同样的处理
-  // （它也不是真的"记住任意滚动位置"，切 tab 本质是整个组件卸载重挂载，
-  // 它只是每次挂载、数据到位后无条件把 scrollTop 拉到底）。只在本次挂载
-  // 触发一次，之后的手动刷新/自动刷新不会再抢用户当前的滚动位置。
+  // 挂载后数据首次到位时跳到最底部（最新一行）；只在本次挂载触发一次，
+  // 之后的刷新不再抢用户当前的滚动位置。
   React.useLayoutEffect(() => {
     if (scrollInitialized.current) return
     if (loading || rows.length === 0) return

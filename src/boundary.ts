@@ -81,11 +81,9 @@ export function prefixHits(nodes: SurfaceNode[], anchor: string): number[] {
   return hits
 }
 
-// AMBIGUOUS 候选的预览：多条 checkpoint 消息共享官方注入的固定前缀
-// （host 的 `dsh-compaction-basic` 给每条 checkpoint 套的 preamble/
-// `<compacted-summary>` 标签，逐字相同）时，若每条都只截前 80 字，
-// 预览会完全一样、看不出该选哪个。这里先找出所有候选共享的最长前缀，
-// 跳过它再截 80 字，让预览从真正分叉的内容开始。
+// AMBIGUOUS 候选的预览：checkpoint 消息共享 dsh-compaction-basic 注入的固定
+// 前缀（preamble + `<compacted-summary>` 标签）时，直接截前 80 字会让预览
+// 完全一样。先跳过候选共享的最长公共前缀再截，让预览从真正分叉处开始。
 function hitPreview(nodes: SurfaceNode[], hits: number[]): string {
   const texts = hits.map((i) => nodeText(nodes[i], true))
   const shared = hits.length > 1 ? commonPrefixLen(texts) : 0

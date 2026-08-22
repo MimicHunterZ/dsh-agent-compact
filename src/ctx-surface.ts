@@ -32,8 +32,7 @@ export const row$schema = z.object({
   // 客户端 bundle 会，两端存在更新窗口期。
   tokens: z.number().readonly().optional(),
   blocks: z.array(block$schema).readonly(),
-  // `user/message` 事件上的原始 `data.source.kind`，用于区分真实用户轮次与
-  // 合成注入的 "context" 行（与官方 trajectory 面板的判定一致）。
+  // 原始 `data.source.kind`，区分真实用户轮次与合成注入的 "context" 行。
   source: z.string().readonly().optional(),
 })
 

@@ -9,8 +9,7 @@ export function isToolCallOnly(row: CtxSurfaceRow): boolean {
   return row.type === 'assistant/message' && row.blocks.length > 0 && row.blocks.every((b) => b.kind === 'tool-call')
 }
 
-// 镜像官方 trajectory 的类型分类：source.kind 非 'user' 的 user/message 行
-// 是合成的 "context" 行，而非真实用户轮次。
+// source.kind 非 'user' 的 user/message 行是合成的 "context" 行，而非真实用户轮次。
 export function rowKind(row: CtxSurfaceRow): 'user' | 'context' | 'message' | 'tool' {
   if (row.type === 'tool/result') return 'tool'
   if (row.type === 'user/message') return row.source !== undefined && row.source !== 'user' ? 'context' : 'user'

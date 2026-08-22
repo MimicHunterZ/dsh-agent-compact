@@ -25,21 +25,15 @@ export interface InputActions {
   setDraft?(text: string): void
 }
 
-// 会话快照的最小切片：只声明本面板真正读取的字段。这不是
-// dsh-client-ui-conversation 对外发布的公开类型（没有 @deepseek-ai/dsh-client-ui-conversation
-// 的类型依赖），形状是照着官方 trajectory 面板（TrajectoryView 用
-// `s.chat.order`/`s.chat.nodes` 等字段）反推出来的，往小了声明以降低随宿主
+// 会话快照的最小切片：只声明本面板真正读取的字段，往小了声明以降低随宿主
 // 升级漂移的风险。
 export interface CtxSurfaceSessionSnapshot {
   readonly chat?: { readonly order?: readonly unknown[] }
 }
 
-// `conversation.view` Slot 声明的是 `scope: "session"`；宿主的 Slot 框架
-// （dsh-client-ui-renderer 的 standardProps/standardKit）对这个 scope 下的
-// 每一个占位组件都统一注入这个 hook，不需要本插件自己的 `inject` 回调显式
-// 返回它——官方 trajectory 面板的 TrajectoryView 组件同样只是在函数签名里
-// 解构 `useSession`，自己的 inject 回调里也没有返回过它，对照确认过。
-// 用它订阅会话快照，让面板随消息增长自动刷新，而不必自己起定时器轮询。
+// `conversation.view` Slot 的 `scope: "session"` 会让宿主为每个占位组件统一
+// 注入这个 hook（inject 回调无需返回它）。用它订阅会话快照，让面板随消息
+// 增长自动刷新，而不必自己起定时器轮询。
 export type UseSessionHook = <T>(
   selector: (snapshot: CtxSurfaceSessionSnapshot) => T,
   equalityFn?: (a: T, b: T) => boolean,

@@ -1,8 +1,8 @@
 export const CSS_TAG = '@mimichunterz/agent-compact/ctx-surface.css'
 
-// cxp = "ctx panel" v2。颜色值引用与官方 trajectory 面板一致的 --dsw-* 设计
-// token。注意：--dsh-trajectory-bottom-clearance 需在本地定义（官方面板只在
-// 自己的子树内定义它），否则 cxpTablePane 的底部留白会回退为 0。
+// cxp = "ctx panel" v2。颜色值引用 --dsw-* 设计 token。注意：
+// --dsh-trajectory-bottom-clearance 需在本地定义，否则 cxpTablePane 的底部
+// 留白会回退为 0。
 export const CSS = `
 .cxpRoot{--dsh-trajectory-toolbar-height:34px;box-sizing:border-box;width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);flex-direction:column;display:flex;overflow:hidden}
 .cxpToolbar{box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2);flex:none;align-items:center;gap:6px;height:var(--dsh-trajectory-toolbar-height);padding:0 10px;display:flex}
