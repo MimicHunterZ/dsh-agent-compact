@@ -26,6 +26,8 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
   const resizeStartRef = React.useRef<{ startX: number; startWidth: number } | null>(null)
 
   const rowElRefs = React.useRef<Map<string, HTMLTableRowElement>>(new Map())
+  const tablePaneRef = React.useRef<HTMLDivElement | null>(null)
+  const scrollInitialized = React.useRef(false)
 
   // 视图栏状态：Duration/Turns/Calls 等价行；actualWidth 按 chars 比例分配宽度。
   const [actualWidth, setActualWidth] = React.useState(false)
@@ -184,6 +186,19 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
     return { displayItems: items, domKeyOf }
   }, [filtered, rows, turnsCollapsed, callsCollapsed, expandedKeys])
 
+  // 挂载后首次加载完就跳到最底部（最新一行）——和官方轨迹面板同样的处理
+  // （它也不是真的"记住任意滚动位置"，切 tab 本质是整个组件卸载重挂载，
+  // 它只是每次挂载、数据到位后无条件把 scrollTop 拉到底）。只在本次挂载
+  // 触发一次，之后的手动刷新/自动刷新不会再抢用户当前的滚动位置。
+  React.useLayoutEffect(() => {
+    if (scrollInitialized.current) return
+    if (loading || rows.length === 0) return
+    const pane = tablePaneRef.current
+    if (!pane) return
+    scrollInitialized.current = true
+    pane.scrollTop = pane.scrollHeight
+  }, [loading, rows])
+
   // 滚动台账的滚动容器到当前 detailIdx 对应的 <tr>（平滑、居中）。
   React.useEffect(() => {
     if (detailIdx === null) return
@@ -298,7 +313,7 @@ export function CtxSurfaceView(props: CtxSurfaceViewProps): React.ReactElement {
       ),
     ),
     React.createElement('div', { className: 'cxpLedger' },
-      React.createElement('div', { className: 'cxpTablePane' },
+      React.createElement('div', { className: 'cxpTablePane', ref: tablePaneRef },
         loading && rows.length === 0
           ? React.createElement('div', { className: 'cxpEmpty' }, '加载中…')
           : error
