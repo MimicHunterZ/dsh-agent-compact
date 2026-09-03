@@ -22,11 +22,11 @@
 
 工具调用本身发生在 agent 正常轮次内,按普通轮次正常计费;省掉的只是官方引擎为同一区间"额外再发一次摘要器请求"这件事。
 
-### 跨 session 找回被压掉的上下文
+### 以 fork 方式查询压缩前的上下文
 
-`context_ask_precompact(question, compactionId?)` 让 agent 找回某个 `context_compact` 压掉的信息。它**不做本地 revert** -- DSH 表面 fold 是 append-only,没有 un-replace -- 而是从会话日志(`compaction/summary` 的 `shadowedSeqs` + `deriveEventMessage`)重建压缩前的原始 span,再交给一个**全新的子会话**,子会话只被灌入这段内容并回答问题,答案返回主会话。主会话表面与 KV-cache 完全不动,原始消息结构在子会话里得以保留(而不是被压成一条 blob)。
+`context_ask_precompact(question)` 让 agent 对当前(压缩前)的上下文提问,由**一个 fork 子代理**回答,该子代理继承本会话。子代理 join 同一组合(`composeFrom`)——同一 preset、system prompt、tools——并携带父会话已完成的历史,因此它的上下文与主 agent 一致,并可复用同一 warm-prefix 的 KV-cache。在压缩前调用时,父上下文仍是完整的压缩前会话,子代理即可作为"压缩前的 agent"来回答。主会话表面与 cache 完全不动。
 
-依赖子代理能力(`ctx.subagents`)已挂载;优先选一个**不继承父会话**的 provider,让子会话只看重建内容 + 问题。
+依赖子代理能力(`ctx.subagents`)已挂载;工具优先选一个**继承父会话**的 provider(fork),使子代理看到的正是父的上下文;找不到时按名字回退到 `fork`,再回退到第一个已注册的 provider。
 
 ## 安装
 
