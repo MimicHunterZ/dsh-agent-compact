@@ -22,6 +22,12 @@ Typical moments to use it:
 
 The tool call itself happens inside the agent's normal turn and is billed like any other turn; what is avoided is only the *extra* summarizer request the official engine would make for the same span.
 
+### Consulting compacted-away context (cross-session)
+
+`context_ask_precompact(question, compactionId?)` lets the agent recover a detail that a prior `context_compact` compressed away. Instead of "reverting" the compaction — the DSH surface fold is append-only and has no un-replace — the tool reconstructs the original pre-compaction span from the session log (`compaction/summary`'s `shadowedSeqs` + `deriveEventMessage`) and delegates to a **fresh subagent** seeded only with that content. The subagent answers the question from the pre-compaction context and the answer is returned to the main session. The main session's surface and its KV cache are untouched: nothing is reverted and the original message structure is preserved in the child rather than collapsed into one blob.
+
+Requires the subagent capability (`ctx.subagents`) to be mounted; a provider that does **not** inherit the parent conversation is preferred so the child sees only the reconstructed context plus the question.
+
 ## Install
 
 ```sh

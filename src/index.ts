@@ -598,6 +598,145 @@ export function apply(ctx: Context, config: Config) {
     },
   })))
 
+  // ---- pre-compaction consultation (cross-session) ----
+  // The compaction transaction is append-only and the surface fold keeps only
+  // the checkpoint, but the original span events stay in `session.events` and
+  // `compaction/summary` records exactly which seqs they were. Rather than
+  // "reverting" the compaction (the surface protocol has no un-replace), we
+  // reconstruct the pre-compaction content from the log and consult a FRESH
+  // subagent seeded only with that content. The main session surface and its
+  // KV cache are untouched, and the original message structure is preserved in
+  // the child instead of being collapsed into one blob.
+  interface CompactionSummaryEventLike {
+    type?: string
+    data?: {
+      compactionId?: unknown
+      shadowedSeqs?: unknown
+      summary?: unknown
+    }
+  }
+
+  function findCompactionSummary(session: SessionLike, compactionId: string | undefined): CompactionSummaryEventLike | undefined {
+    const events = session.events
+    if (!events) return undefined
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i] as CompactionSummaryEventLike | undefined
+      if (ev && ev.type === 'compaction/summary') {
+        if (compactionId === undefined || String(ev.data?.compactionId) === compactionId) return ev
+      }
+    }
+    return undefined
+  }
+
+  interface SubagentsLike {
+    list(): string[]
+    getProvider(name: string): { inheritsParentContext?: boolean } | undefined
+    start(name: string, request: {
+      label?: string
+      prompt: { type: string; text: string }[]
+      parent: unknown
+      signal: unknown
+    }): Promise<{
+      result: Promise<{ output?: { type?: string; text?: string }[]; stopReason?: unknown; diagnostic?: string }>
+      dispose(): Promise<void>
+    }>
+  }
+
+  // Prefer a provider whose child does NOT inherit the parent conversation, so
+  // the child sees ONLY the reconstructed pre-compaction content + question.
+  function pickPreCompactProvider(subagents: SubagentsLike): string {
+    const names = subagents.list()
+    if (names.length === 0) throw new Error('no subagent provider is registered')
+    for (const name of names) {
+      const p = subagents.getProvider(name)
+      if (p && p.inheritsParentContext === false) return name
+    }
+    return names[0]
+  }
+
+  function deriveMessageText(session: SessionLike, seq: number): string {
+    const events = session.events
+    if (!events) return ''
+    const ev = events[seq]
+    if (!ev) return ''
+    const msg = session.deriveEventMessage ? session.deriveEventMessage(ev) : null
+    if (!msg) return ''
+    const content = (msg as { content?: unknown }).content
+    return blocksText(content, 0, false).replace(/\n+$/, '')
+  }
+
+  function reconstructPreCompact(session: SessionLike, ev: CompactionSummaryEventLike): string {
+    const seqs = Array.isArray(ev.data?.shadowedSeqs) ? ev.data.shadowedSeqs as number[] : []
+    const parts: string[] = []
+    parts.push('You are the pre-compaction version of this conversation. Below is the context that was compressed away earlier; answer the question using ONLY this context.')
+    for (const seq of seqs) {
+      if (typeof seq !== 'number') continue
+      const text = deriveMessageText(session, seq)
+      if (text) parts.push(text)
+    }
+    // When the log no longer derives structured members (e.g. after a deep
+    // sweep), fall back to the summary text recorded on the same event.
+    if (parts.length === 1 && Array.isArray(ev.data?.summary)) {
+      for (const b of ev.data.summary as { type?: string; text?: string }[]) {
+        if (b && b.type === 'text' && typeof b.text === 'string') parts.push(b.text)
+      }
+    }
+    return parts.join('\n\n')
+  }
+
+  disposers.push(tools.register(defineTool({
+    name: 'context_ask_precompact',
+    description: 'Ask a question against the context that a prior context_compact compressed away. Reconstructs the original pre-compaction span from the session log and delegates to a fresh subagent seeded only with that content; the subagent answers from it and the answer is returned here, without touching the main session or its cache. Use when you need a detail a compaction may have lost. Pass compactionId to consult a specific compaction, or omit it for the most recent one.',
+    parameters: {
+      question: { type: 'string', description: 'The question to answer from the pre-compaction context.' },
+      compactionId: { type: 'string', description: 'Optional. The compaction id to consult; omit for the most recent compaction.' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render(args, value) { return [{ type: 'text', text: JSON.stringify(value) }] },
+    },
+    async execute(args, exec) {
+      const agent = agentOf(exec)
+      if (!agent) throw new Error('no agent session available for this call')
+      if (typeof args.question !== 'string' || !args.question.trim()) throw new Error('question is REQUIRED')
+      const session = agent.session
+      const compactionId = typeof args.compactionId === 'string' && args.compactionId ? args.compactionId : undefined
+      const ev = findCompactionSummary(session, compactionId)
+      if (!ev) throw new Error('no compaction to consult: run context_compact first, or provide a valid compactionId')
+      const preCompact = reconstructPreCompact(session, ev)
+      const subagents = resolveService(agent, 'subagents') as SubagentsLike | undefined
+      if (!subagents) throw new Error('subagents service is not available in this runtime; mount the subagent capability')
+      const providerName = pickPreCompactProvider(subagents)
+      const promptText = preCompact + '\n\nQuestion to answer from the context above:\n' + args.question
+      const run = await subagents.start(providerName, {
+        label: 'ask pre-compaction context',
+        prompt: [{ type: 'text', text: promptText }],
+        parent: agent,
+        signal: exec.signal,
+      })
+      let result: { output?: { type?: string; text?: string }[]; stopReason?: unknown; diagnostic?: string }
+      try {
+        result = await run.result
+      } finally {
+        try { await run.dispose() } catch (e) { /* ignore */ }
+      }
+      const answer = (result.output ?? [])
+        .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+        .map((b) => b.text as string)
+        .join('')
+      const data: Record<string, JsonValue> = {
+        ok: result.stopReason === 'completed',
+        answer: answer || '(empty)',
+      }
+      const cid = ev.data?.compactionId
+      if (cid !== undefined) data['compactionId'] = String(cid)
+      const sr = result.stopReason
+      if (sr !== undefined) data['stopReason'] = String(sr)
+      if (result.diagnostic) data['diagnostic'] = result.diagnostic
+      return data
+    },
+  })))
+
   return () => {
     for (const d of disposers) {
       try {

@@ -1,7 +1,7 @@
 {
   "name": "@mimichunterz/agent-compact",
-  "version": "0.1.3",
-  "description": "Context compression tool (context_compact): the agent writes the replacement checkpoint itself and hands it to the host compaction engine, which skips the LLM summarizer call; automatic compaction stays on the official engine.",
+  "version": "0.2.0",
+  "description": "Context compression tools for DeepSeek Harness: context_compact (the agent writes the replacement checkpoint and hands it to the host engine) plus context_ask_precompact (consult the compressed-away context via a fresh subagent).",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
