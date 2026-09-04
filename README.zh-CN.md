@@ -17,7 +17,7 @@
 ## 它做什么
 
 - agent 用 `startAnchor` / `endAnchor` 圈定区间(唯一前缀匹配,全角/半角标点不敏感),并传入**强制要求**的 `summary` —— 自己写的 Markdown 检查点。
-- 原始区间全文先归档到 spill(`~/.dsh/spill/session-<hash>/<hex>-<序号>.txt`,顺序命名、重启安全);路径通过 shadow 消息回显,模型可随时读回原文。
+- 原始区间全文先归档到 spill(`~/.dsh/spill/session-<hash>/<hex>-<序号>.txt`,顺序命名、重启安全);归档定位符在工具结果里返回,模型可随时读回原文。
 - 宿主引擎执行官方事务 —— 边界校验、工具对平衡、表面替换 —— **不发起独立的 LLM 摘要器请求**。
 
 工具调用本身发生在 agent 正常轮次内,按普通轮次正常计费;省掉的只是官方引擎为同一区间"额外再发一次摘要器请求"这件事。
@@ -69,7 +69,7 @@ dsh plugin --profile web remove @mimichunterz/agent-compact
 - **agent 自写检查点**:`summary` 是强制参数,工具路径总是走 agent 写的检查点。`patchEngine()`(见 `src/optimizer.ts`)包装引擎的 `summarize()` —— 存在 `_externalSummary`(按会话 id 一次性消费)时直接返回该文本;没有时才转发 stock 实现,该分支只服务于自动压缩路径,保持官方行为不变。
 - **锚点定位**(`src/normalize.ts`):`normText` 折叠空白并把 CJK 全角标点映射为半角(，→, 等),锚点与节点文本共用同一函数;仍保持**唯一前缀**语义(0 命中 → not found + 最近节点提示;多命中 → AMBIGUOUS)。
 - **重启安全的顺序归档**:fs 扫描会话目录取 `max+1` 顺序递增,无空洞;后端自带随机 hex 前缀,文件名永不冲突。
-- **配对清理**:携带完整 `summary` 参数的工具调用消息节点 + tool/result 各被替换成一条极小的 shadow 消息,避免检查点文本在表面出现两份(同一消息含多个工具调用时安全跳过)。
+- **不删除任何消息**:调用方的 assistant 消息(它的推理 + 携带 `summary` 的 tool-call)及其 tool/result 都留在表面 —— 它们不在压缩区间里,shadow 掉就会丢掉 agent 压缩前的推理。因此 summary 会同时出现在检查点(区间位置)和 tool-call 参数里 —— 为了不丢消息而接受这份冗余。
 
 ## 兼容性
 

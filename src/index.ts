@@ -13,7 +13,6 @@ import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import Schema from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { createShadowUserMessage } from './shadow-message.js'
 import { patchEngine } from './optimizer.js'
 import { normText } from './normalize.js'
 import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode } from './optimizer.js'
@@ -88,27 +87,6 @@ export function apply(ctx: Context, config: Config) {
     message?: { content?: unknown } | null
     content?: unknown
     error?: { code?: unknown } | null
-  }
-
-  interface SessionEventLike {
-    type?: string
-    seq?: number
-    data?: unknown
-    sourceEventSeqs?: unknown
-  }
-
-  // The assistant/message that carries exactly this one tool-call (used to
-  // decide whether the call's message node can be shadowed without breaking
-  // sibling tool calls in the same message).
-  function soleToolCall(n: SurfaceNode, callId: string): boolean {
-    if (n.type !== 'assistant/message') return false
-    const content = (n.data as { message?: { content?: unknown } } | undefined)?.message?.content
-    if (!Array.isArray(content)) return false
-    const calls = content.filter((b) => {
-      const block = b as { type?: unknown; id?: unknown }
-      return block !== null && typeof block === 'object' && block.type === 'tool-call'
-    })
-    return calls.length === 1 && (calls[0] as { id?: unknown }).id === callId
   }
 
   interface AnyBlock {
@@ -509,76 +487,13 @@ export function apply(ctx: Context, config: Config) {
         throw new Error('compaction rejected range [' + startSeq + ',' + endSeq + ']: ' + msg)
       }
       const usage = findSummaryUsage(agent.session, result.compactionId)
-      // Paired cleanup of THIS call: the checkpoint is injected separately, so
-      // the assistant/message carrying this call's tool-call (with the full
-      // summary argument) plus its tool/result would leave the checkpoint text
-      // in the surface twice. The surface protocol only knows append/replace
-      // (no remove), so both nodes are shadowed individually — each replaced by
-      // one tiny placeholder — after the framework has written the result
-      // (post-commit feed). NOTE: tool/call events are NOT surface nodes
-      // (SurfaceEventType is user/assistant/message + tool/result), so the
-      // replace must target the assistant/message node. Only when that message
-      // holds exactly this one tool-call is it safe to shadow (a multi-call
-      // message must keep its other tool calls paired with their results).
-      const callId = (exec as { callId?: unknown }).callId
-      if (typeof callId === 'string' && callId) {
-        const holder = nodes.filter((n) => soleToolCall(n, callId)).pop()
-        const assistantSeq = holder ? holder.seq : undefined
-        if (assistantSeq !== undefined && assistantSeq > endSeq) {
-          const sid = agent.session.id
-          let done = false
-          const off = ctx.on('session/event', (s: { id?: string } | undefined, ev: SessionEventLike) => {
-            if (done) return
-            if (!s || s.id !== sid) return
-            if (ev.type !== 'tool/result') return
-            const d = ev.data as { message?: { source?: { callId?: unknown } } } | null | undefined
-            const src = d && d.message && d.message.source ? d.message.source.callId : undefined
-            if (src !== callId) return
-            done = true
-            try {
-              off()
-            } catch (e) {
-              /* ignore */
-            }
-            try {
-              const session = agent.session as unknown as { append: (type: string, data: unknown, opts: unknown) => unknown }
-              if (!session || typeof session.append !== 'function') return
-              // The listener runs synchronously INSIDE the framework's own
-              // tool/result append publication (`invokeContainedSessionObservers`),
-              // where `entry.appending` is still true — calling session.append
-              // synchronously trips the reentry guard and throws. Defer to the
-              // microtask queue so the current publication fully unwinds first.
-              const resultSeq = ev.seq
-              const run = () => {
-                try {
-                  // Surface the archive locator so the model can read the raw
-                  // span back: the tool/result that carried it is shadowed below,
-                  // so without this the path would be lost.
-                  const locText = archived && archived.locator ? String(archived.locator) : ''
-                  const doneText = locText
-                    ? '`context_compact` done: checkpoint above; raw span archived at ' + locText + '.'
-                    : '`context_compact` done: checkpoint above; raw span not archived.'
-                  session.append('user/message', createShadowUserMessage(doneText), {
-                    surfaceOp: { op: 'replace', start: assistantSeq, end: assistantSeq },
-                    sourceEventSeqs: [assistantSeq],
-                  })
-                  session.append('user/message', createShadowUserMessage('`context_compact` result shadowed.'), {
-                    surfaceOp: { op: 'replace', start: resultSeq, end: resultSeq },
-                    sourceEventSeqs: [resultSeq],
-                  })
-                  ctx.logger.info('[context_compact] %s paired cleanup: shadowed assistant/message %d + tool/result %d', sid, assistantSeq, resultSeq)
-                } catch (e) {
-                  ctx.logger.warn('[context_compact] %s paired cleanup failed: %s', sid, e && (e as Error).message ? (e as Error).message : String(e))
-                }
-              }
-              if (typeof queueMicrotask === 'function') queueMicrotask(run)
-              else setTimeout(run, 0)
-            } catch (e) {
-              ctx.logger.warn('[context_compact] %s paired cleanup setup failed: %s', sid, e && (e as Error).message ? (e as Error).message : String(e))
-            }
-          })
-        }
-      }
+      // The caller's assistant/message (its reasoning + the tool-call carrying
+      // the summary) and its tool/result are deliberately LEFT on the surface:
+      // they are not part of the compacted span, and shadowing them would drop
+      // the agent's pre-compaction reasoning. The summary therefore appears
+      // both as the checkpoint (at the span) and inside the tool-call argument
+      // — redundancy accepted over losing messages. The tool/result also keeps
+      // the archive locator, so the raw span stays reachable.
       // Debug/introspection metrics go to the log, never into the model-visible
       // tool result (DSH tool convention: the execute return IS what the model
       // sees, so it must stay minimal — see bash/read/goal tools).
