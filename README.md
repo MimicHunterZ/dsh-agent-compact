@@ -66,10 +66,10 @@ Pass through the inserted row in the profile's `cordis.patch.yml` or a bundle pa
 
 ## How it works
 
-- **Agent-written checkpoint**: `summary` is mandatory, so the tool path always uses the checkpoint the agent wrote. `patchEngine()` (see `src/optimizer.ts`) wraps the engine's `summarize()`: when an `_externalSummary` is present (one-shot, keyed per session id), it returns that text directly; only when none is present does it forward to the stock implementation — a branch that serves the automatic compaction path and keeps official behavior intact.
+- **Agent-written checkpoint**: `summary` is mandatory, so the tool path always uses the checkpoint the agent wrote. `patchEngine()` (see `src/optimizer.ts`) wraps the engine's `summarize()`: when an `_externalSummary` is present (one-shot, keyed per session id), it consumes it and returns a short **placeholder** instead of re-summarizing; only when none is present does it forward to the stock implementation — a branch that serves the automatic compaction path and keeps official behavior intact.
 - **Anchor matching** (`src/normalize.ts`): `normText` collapses whitespace and maps CJK full-width punctuation to half-width (，→, etc.), applied to both anchors and node text. Matching keeps **unique-prefix** semantics: zero hits → "not found" with closest-node hints; more than one hit → "AMBIGUOUS".
 - **Restart-safe sequential archives**: the next number is derived by scanning the session's spill directory (`max+1`) — gap-free; the backend's random hex prefix makes filename collisions impossible.
-- **No message is removed**: the caller's assistant/message (its reasoning + the tool-call carrying the `summary`) and its tool/result stay on the surface, because they are not part of the compacted span and shadowing them would drop the agent's pre-compaction reasoning. The summary therefore appears both as the checkpoint (at the span) and inside the tool-call argument — redundancy accepted over losing messages.
+- **No message is removed, and the summary appears once**: the caller's assistant/message (its reasoning + the tool-call carrying the `summary`) and its tool/result stay on the surface — they are not part of the compacted span, and shadowing them would drop the agent's pre-compaction reasoning. The span replacement is a short placeholder, so the checkpoint lives exactly once: as the `summary` argument of that tool-call, not also at the span.
 
 ## Compatibility
 

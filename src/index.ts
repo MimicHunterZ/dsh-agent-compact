@@ -488,12 +488,13 @@ export function apply(ctx: Context, config: Config) {
       }
       const usage = findSummaryUsage(agent.session, result.compactionId)
       // The caller's assistant/message (its reasoning + the tool-call carrying
-      // the summary) and its tool/result are deliberately LEFT on the surface:
-      // they are not part of the compacted span, and shadowing them would drop
-      // the agent's pre-compaction reasoning. The summary therefore appears
-      // both as the checkpoint (at the span) and inside the tool-call argument
-      // — redundancy accepted over losing messages. The tool/result also keeps
-      // the archive locator, so the raw span stays reachable.
+      // the summary) and its tool/result are LEFT on the surface: they are not
+      // part of the compacted span, and shadowing them would drop the agent's
+      // pre-compaction reasoning. The span replacement is a short placeholder
+      // (see optimizer.ts), so the checkpoint appears exactly once — as the
+      // summary argument of this tool-call — instead of being duplicated at the
+      // span. The tool/result keeps the archive locator, so the raw span stays
+      // reachable.
       // Debug/introspection metrics go to the log, never into the model-visible
       // tool result (DSH tool convention: the execute return IS what the model
       // sees, so it must stay minimal — see bash/read/goal tools).

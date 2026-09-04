@@ -6,8 +6,10 @@
 //
 //   - context_compact hands the agent-written Markdown checkpoint to the
 //     engine through _externalSummary (one-shot, keyed per session id);
-//   - the patched summarize() returns that text directly — no LLM call, no
-//     re-summarization — while the whole durable transaction (boundary
+//   - the patched summarize() consumes it and returns a short PLACEHOLDER — no
+//     LLM call, no re-summarization — so the checkpoint (the tool-call's
+//     `summary` argument, which stays on the surface) is not duplicated as the
+//     span replacement, while the whole durable transaction (boundary
 //     validation, tool-pair balance, compaction/start-end markers, surface
 //     replace, spill archive) stays in the stock engine;
 //   - every other path (automatic pressure/overflow, /compact) is untouched:
@@ -56,7 +58,15 @@ export interface OptimizedEngineLike {
 // so later optimizer edits (e.g. the checkpoint injection) would never take
 // effect until a process restart. The versioned guard re-binds summarize on
 // every patch so code edits hot-apply.
-export const PATCH_VERSION = 3
+export const PATCH_VERSION = 4
+
+// The span replacement written when an agent-provided checkpoint is present.
+// The full checkpoint is the tool-call's `summary` argument (the caller message
+// is left on the surface), so a copy of it as the replacement would put the
+// summary on the surface twice. The replacement is a short placeholder instead,
+// pointing at the tool-call that carries the real checkpoint.
+const COMPACT_PLACEHOLDER =
+  '[context_compact: this span was compressed; its checkpoint is the summary argument of the invoking context_compact call.]'
 
 export function patchEngine(engine: OptimizedEngineLike): boolean {
   if (!engine || typeof engine.summarize !== 'function') return false
@@ -67,12 +77,12 @@ export function patchEngine(engine: OptimizedEngineLike): boolean {
     const sid = a && a.session && a.session.id ? a.session.id : undefined
     const ext = this._externalSummary
     if (sid && ext && typeof ext[sid] === 'string') {
-      const text = ext[sid]
       delete ext[sid]
-      // Same runtime shape the stock summarizer returns (text summary +
-      // usage envelope); the engine's frameSummary + size check still apply.
+      // Same runtime shape the stock summarizer returns (summary + usage
+      // envelope); the engine's frameSummary + size check still apply. The
+      // full checkpoint is not repeated here — it lives in the tool-call.
       return {
-        summary: [{ type: 'text', text }],
+        summary: [{ type: 'text', text: COMPACT_PLACEHOLDER }],
         rawOutput: [],
         llmStreamCall: false,
         provider: 'agent',

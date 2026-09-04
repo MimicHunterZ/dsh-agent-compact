@@ -66,10 +66,10 @@ dsh plugin --profile web remove @mimichunterz/agent-compact
 
 ## 工作原理
 
-- **agent 自写检查点**:`summary` 是强制参数,工具路径总是走 agent 写的检查点。`patchEngine()`(见 `src/optimizer.ts`)包装引擎的 `summarize()` —— 存在 `_externalSummary`(按会话 id 一次性消费)时直接返回该文本;没有时才转发 stock 实现,该分支只服务于自动压缩路径,保持官方行为不变。
+- **agent 自写检查点**:`summary` 是强制参数,工具路径总是走 agent 写的检查点。`patchEngine()`(见 `src/optimizer.ts`)包装引擎的 `summarize()` —— 存在 `_externalSummary`(按会话 id 一次性消费)时消费它并返回一个短**占位符**而不是重新摘要;没有时才转发 stock 实现,该分支只服务于自动压缩路径,保持官方行为不变。
 - **锚点定位**(`src/normalize.ts`):`normText` 折叠空白并把 CJK 全角标点映射为半角(，→, 等),锚点与节点文本共用同一函数;仍保持**唯一前缀**语义(0 命中 → not found + 最近节点提示;多命中 → AMBIGUOUS)。
 - **重启安全的顺序归档**:fs 扫描会话目录取 `max+1` 顺序递增,无空洞;后端自带随机 hex 前缀,文件名永不冲突。
-- **不删除任何消息**:调用方的 assistant 消息(它的推理 + 携带 `summary` 的 tool-call)及其 tool/result 都留在表面 —— 它们不在压缩区间里,shadow 掉就会丢掉 agent 压缩前的推理。因此 summary 会同时出现在检查点(区间位置)和 tool-call 参数里 —— 为了不丢消息而接受这份冗余。
+- **不删除任何消息,且 summary 只出现一次**:调用方的 assistant 消息(它的推理 + 携带 `summary` 的 tool-call)及其 tool/result 都留在表面 —— 它们不在压缩区间里,shadow 掉就会丢掉 agent 压缩前的推理。区间替换是一个短占位符,因此检查点只出现一次:作为那条 tool-call 的 `summary` 参数,不会在区间位置再复制一份。
 
 ## 兼容性
 
