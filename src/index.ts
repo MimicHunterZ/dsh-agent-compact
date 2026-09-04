@@ -787,19 +787,22 @@ export function apply(ctx: Context, config: Config) {
     },
   })))
 
-  // ---- automatic range compaction (no anchors) ----
-  // The agent calls this to compact without naming a range: the engine's own
-  // pressure trigger auto-selects the oldest compactable span and replaces it
-  // with the engine's summarizer checkpoint (an LLM call, since no agent-written
-  // summary is provided). `compactIfNeeded(agent, 'pressure', signal)` is the
-  // engine's automatic path, which works against an open turn (the tool is
-  // called mid-step) and returns null when the context is below the threshold,
-  // so there is nothing worth compacting. A stale `_externalSummary` from a
-  // previous `context_compact` is cleared so this path always uses the engine's
-  // own summarizer.
+  // ---- automatic range compaction (no anchors, no threshold) ----
+  // The agent calls this to compact without naming a range: the engine
+  // auto-selects a compactable span and replaces it with the engine's own
+  // summarizer checkpoint (an LLM call, since no agent-written summary is
+  // provided). `compactIfNeeded(agent, 'context-overflow', signal)` is the
+  // engine's FORCED path: it skips the pressure threshold (the `pressure`
+  // trigger only compacts once measured tokens cross a configured limit) and
+  // goes straight to range selection + `compactRegion`, so calling the tool
+  // always compacts a span when one exists. It works against an open turn (the
+  // tool is called mid-step) and returns null only when the surface holds no
+  // compactable span yet. A stale `_externalSummary` from a previous
+  // `context_compact` is cleared so this path always uses the engine's own
+  // summarizer.
   disposers.push(tools.register(defineTool({
     name: 'context_compact_auto',
-    description: 'Compress the conversation automatically: the engine auto-selects the oldest compactable range and replaces it with its own summarizer checkpoint, without you naming a span or writing a summary. Use when you want to compact but do not need to choose the range. The engine compacts only when pressure is above its configured threshold; otherwise it reports that nothing qualified.',
+    description: 'Compress the conversation automatically: the engine auto-selects a compactable range and replaces it with its own summarizer checkpoint, without you naming a span or writing a summary. Use when you want to compact without choosing a range. Compacts unconditionally (no pressure threshold); it reports that nothing qualified only when the surface holds no compactable span yet.',
     parameters: {},
     output: {
       schema: { type: 'object', additionalProperties: true },
@@ -815,11 +818,11 @@ export function apply(ctx: Context, config: Config) {
       // Never let a leftover agent-written checkpoint leak into the auto path.
       const ext = (engine as unknown as { _externalSummary?: Record<string, string> })._externalSummary
       if (ext && agent.session.id in ext) delete ext[agent.session.id]
-      const result = await engine.compactIfNeeded(agent, 'pressure', exec.signal)
+      const result = await engine.compactIfNeeded(agent, 'context-overflow', exec.signal)
       const data: Record<string, JsonValue> = {
         ok: true,
         compacted: result !== null,
-        ...(result === null ? { message: 'no range to compact (context below the pressure threshold)' } : {}),
+        ...(result === null ? { message: 'no compactable span on the surface yet' } : {}),
       }
       if (result !== null) {
         data['compactionId'] = result.compactionId

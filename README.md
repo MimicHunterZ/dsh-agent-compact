@@ -24,7 +24,7 @@ The tool call itself happens inside the agent's normal turn and is billed like a
 
 ### Auto range selection
 
-`context_compact_auto` compacts without naming a span: the engine's own pressure trigger auto-selects the oldest compactable range and replaces it with the engine's summarizer checkpoint. It reports what was compacted, or that nothing qualified (the context was below the pressure threshold). Because the auto path provides no agent-written checkpoint, it uses the engine's summarizer (an LLM call).
+`context_compact_auto` compacts without naming a span: the engine auto-selects a compactable range and replaces it with the engine's summarizer checkpoint. It compacts unconditionally — there is no pressure-threshold gate — and reports what was compacted, or that nothing qualified (the surface holds no compactable span yet). Because the auto path provides no agent-written checkpoint, it uses the engine's summarizer (an LLM call).
 
 ### Consulting the pre-compaction context (fork of the pre-compaction state)
 
