@@ -6,13 +6,13 @@
 // per-session compaction engine on first use so its summarize() honors
 // agent-written checkpoints (see ./optimizer.js).
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import Schema from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
-import { createShadowUserMessage } from './shadow-message.js'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { patchEngine } from './optimizer.js'
 import { normText } from './normalize.js'
 import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode } from './optimizer.js'
@@ -87,27 +87,6 @@ export function apply(ctx: Context, config: Config) {
     message?: { content?: unknown } | null
     content?: unknown
     error?: { code?: unknown } | null
-  }
-
-  interface SessionEventLike {
-    type?: string
-    seq?: number
-    data?: unknown
-    sourceEventSeqs?: unknown
-  }
-
-  // The assistant/message that carries exactly this one tool-call (used to
-  // decide whether the call's message node can be shadowed without breaking
-  // sibling tool calls in the same message).
-  function soleToolCall(n: SurfaceNode, callId: string): boolean {
-    if (n.type !== 'assistant/message') return false
-    const content = (n.data as { message?: { content?: unknown } } | undefined)?.message?.content
-    if (!Array.isArray(content)) return false
-    const calls = content.filter((b) => {
-      const block = b as { type?: unknown; id?: unknown }
-      return block !== null && typeof block === 'object' && block.type === 'tool-call'
-    })
-    return calls.length === 1 && (calls[0] as { id?: unknown }).id === callId
   }
 
   interface AnyBlock {
@@ -508,76 +487,14 @@ export function apply(ctx: Context, config: Config) {
         throw new Error('compaction rejected range [' + startSeq + ',' + endSeq + ']: ' + msg)
       }
       const usage = findSummaryUsage(agent.session, result.compactionId)
-      // Paired cleanup of THIS call: the checkpoint is injected separately, so
-      // the assistant/message carrying this call's tool-call (with the full
-      // summary argument) plus its tool/result would leave the checkpoint text
-      // in the surface twice. The surface protocol only knows append/replace
-      // (no remove), so both nodes are shadowed individually — each replaced by
-      // one tiny placeholder — after the framework has written the result
-      // (post-commit feed). NOTE: tool/call events are NOT surface nodes
-      // (SurfaceEventType is user/assistant/message + tool/result), so the
-      // replace must target the assistant/message node. Only when that message
-      // holds exactly this one tool-call is it safe to shadow (a multi-call
-      // message must keep its other tool calls paired with their results).
-      const callId = (exec as { callId?: unknown }).callId
-      if (typeof callId === 'string' && callId) {
-        const holder = nodes.filter((n) => soleToolCall(n, callId)).pop()
-        const assistantSeq = holder ? holder.seq : undefined
-        if (assistantSeq !== undefined && assistantSeq > endSeq) {
-          const sid = agent.session.id
-          let done = false
-          const off = ctx.on('session/event', (s: { id?: string } | undefined, ev: SessionEventLike) => {
-            if (done) return
-            if (!s || s.id !== sid) return
-            if (ev.type !== 'tool/result') return
-            const d = ev.data as { message?: { source?: { callId?: unknown } } } | null | undefined
-            const src = d && d.message && d.message.source ? d.message.source.callId : undefined
-            if (src !== callId) return
-            done = true
-            try {
-              off()
-            } catch (e) {
-              /* ignore */
-            }
-            try {
-              const session = agent.session as unknown as { append: (type: string, data: unknown, opts: unknown) => unknown }
-              if (!session || typeof session.append !== 'function') return
-              // The listener runs synchronously INSIDE the framework's own
-              // tool/result append publication (`invokeContainedSessionObservers`),
-              // where `entry.appending` is still true — calling session.append
-              // synchronously trips the reentry guard and throws. Defer to the
-              // microtask queue so the current publication fully unwinds first.
-              const resultSeq = ev.seq
-              const run = () => {
-                try {
-                  // Surface the archive locator so the model can read the raw
-                  // span back: the tool/result that carried it is shadowed below,
-                  // so without this the path would be lost.
-                  const locText = archived && archived.locator ? String(archived.locator) : ''
-                  const doneText = locText
-                    ? '`context_compact` done: checkpoint above; raw span archived at ' + locText + '.'
-                    : '`context_compact` done: checkpoint above; raw span not archived.'
-                  session.append('user/message', createShadowUserMessage(doneText), {
-                    surfaceOp: { op: 'replace', start: assistantSeq, end: assistantSeq },
-                    sourceEventSeqs: [assistantSeq],
-                  })
-                  session.append('user/message', createShadowUserMessage('`context_compact` result shadowed.'), {
-                    surfaceOp: { op: 'replace', start: resultSeq, end: resultSeq },
-                    sourceEventSeqs: [resultSeq],
-                  })
-                  ctx.logger.info('[context_compact] %s paired cleanup: shadowed assistant/message %d + tool/result %d', sid, assistantSeq, resultSeq)
-                } catch (e) {
-                  ctx.logger.warn('[context_compact] %s paired cleanup failed: %s', sid, e && (e as Error).message ? (e as Error).message : String(e))
-                }
-              }
-              if (typeof queueMicrotask === 'function') queueMicrotask(run)
-              else setTimeout(run, 0)
-            } catch (e) {
-              ctx.logger.warn('[context_compact] %s paired cleanup setup failed: %s', sid, e && (e as Error).message ? (e as Error).message : String(e))
-            }
-          })
-        }
-      }
+      // The caller's assistant/message (its reasoning + the tool-call carrying
+      // the summary) and its tool/result are LEFT on the surface: they are not
+      // part of the compacted span, and shadowing them would drop the agent's
+      // pre-compaction reasoning. The span replacement is a short placeholder
+      // (see optimizer.ts), so the checkpoint appears exactly once — as the
+      // summary argument of this tool-call — instead of being duplicated at the
+      // span. The tool/result keeps the archive locator, so the raw span stays
+      // reachable.
       // Debug/introspection metrics go to the log, never into the model-visible
       // tool result (DSH tool convention: the execute return IS what the model
       // sees, so it must stay minimal — see bash/read/goal tools).
@@ -595,6 +512,241 @@ export function apply(ctx: Context, config: Config) {
       }
       if (archiveError) out.archiveError = typeof archiveError === 'string' ? archiveError : String(archiveError)
       return out
+    },
+  })))
+
+  // ---- pre-compaction consultation (fork of the pre-compaction context) ----
+  // `ctx.subagents.start('fork')` seeds the child with the parent's CURRENT
+  // completed-turn prefix, which after a compaction folds to the post-compaction
+  // surface. To ask the PRE-compaction agent we create the child through the
+  // agent registry (no new dependency) and seed it with the parent's log up to
+  // the last completed turn BEFORE the compaction, so the span that was compacted
+  // away is still original. The child is composed with `agentPresets.composeFrom`,
+  // so it joins the SAME standing composition as the parent — same preset, system
+  // prompt, and tools. (The subagent seam's delegated approval/sandbox policy is
+  // not pinned here; the child is a throwaway context query.) The main session is
+  // untouched; the answer is returned here.
+
+  interface ChildAgentHandleLike {
+    agent: {
+      followup(message: unknown): void
+      whenIdle(): Promise<void>
+      session: {
+        events: readonly unknown[]
+        append(type: string, data: unknown, opts: unknown): unknown
+      }
+    }
+    dispose(): Promise<void>
+  }
+
+  interface AgentsRegistryLike {
+    create(options: {
+      sessionId: string
+      meta?: unknown
+      seed?: readonly unknown[]
+      agentOptions?: unknown
+      signal?: unknown
+      setup?: (childCtx: unknown) => void
+    }): Promise<ChildAgentHandleLike>
+  }
+
+  interface AgentCtxLike {
+    agents?: AgentsRegistryLike
+    get(name: string): unknown
+  }
+
+  // The parent's pre-compaction surface: events up to (and including) the last
+  // completed `turn/end` before the most recent `compaction/start`. Because the
+  // parent log is contiguous from seq 0, this slice is a valid balanced seed and
+  // replays to the pre-compaction surface (the compacted span is not folded).
+  interface PreCompactionSeed {
+    seed: readonly unknown[]
+    boundary: number
+  }
+
+  function findPreCompactionSeed(session: SessionLike): PreCompactionSeed {
+    const events = session.events
+    if (!events || events.length === 0) return { seed: [], boundary: 0 }
+    let compactStartIdx = -1
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i] as { type?: string } | undefined
+      if (ev && ev.type === 'compaction/start') {
+        compactStartIdx = i
+        break
+      }
+    }
+    if (compactStartIdx < 0) return { seed: [], boundary: 0 }
+    let endIdx = compactStartIdx
+    for (let i = compactStartIdx - 1; i >= 0; i--) {
+      const ev = events[i] as { type?: string } | undefined
+      if (ev && ev.type === 'turn/end') {
+        endIdx = i
+        break
+      }
+    }
+    const seed = events.slice(0, endIdx + 1)
+    return { seed: seed as readonly unknown[], boundary: seed.length }
+  }
+
+  // Frame the child's message: the pre-compaction context is in the seed, so the
+  // prompt is just the question (the child answers as the pre-compaction agent).
+  function childPrompt(question: string): unknown {
+    return createUserMessage({
+      content: [{ type: 'text', text: question }],
+      source: { kind: 'user' },
+    })
+  }
+
+  // Read the child's own output and turn outcome from its post-boundary events
+  // without importing the subagent seam's helpers: the last non-empty
+  // assistant/message is the answer, the last turn/end's reason is the outcome.
+  function readChildAnswer(childSession: { events: readonly unknown[] }, boundary: number): { answer: string; outcome: string } {
+    const own = childSession.events.slice(boundary)
+    let answer = ''
+    let outcome = 'completed'
+    for (let i = own.length - 1; i >= 0; i--) {
+      const ev = own[i] as { type?: string; data?: unknown } | undefined
+      if (!ev || typeof ev.type !== 'string') continue
+      if (ev.type === 'turn/end') {
+        const reasonKind = (ev.data as { reason?: { kind?: string } } | undefined)?.reason?.kind
+        if (typeof reasonKind === 'string' && reasonKind !== 'completed') outcome = reasonKind
+        break
+      }
+      if (ev.type === 'assistant/message' && answer === '') {
+        const msg = (ev.data as { message?: { content?: unknown } } | undefined)?.message
+        const content = msg && Array.isArray(msg.content) ? msg.content : []
+        const text = content
+          .filter((b): b is { type: 'text'; text: string } => typeof b === 'object' && b !== null && (b as { type?: string }).type === 'text' && typeof (b as { text?: string }).text === 'string')
+          .map((b) => b.text)
+          .join('')
+        if (text) answer = text
+      }
+    }
+    return { answer: answer || '(empty)', outcome }
+  }
+
+  disposers.push(tools.register(defineTool({
+    name: 'context_ask_precompact',
+    description: 'Ask a question against the PRE-compaction context, answered by a fork subagent seeded with the conversation as it stood before the most recent compaction. The child is composed exactly like a fork child (same preset, system prompt, tools) and replays the pre-compaction log, so the span that context_compact compressed away is still present and its context matches the main agent\'s pre-compaction state — eligible for the same warm-prefix KV cache. Use it to consult a detail the compaction is about to (or already did) remove. The main session is untouched; the answer is returned here.',
+    parameters: {
+      question: { type: 'string', description: 'The question to answer from the pre-compaction context.' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render(args, value) { return [{ type: 'text', text: JSON.stringify(value) }] },
+    },
+    async execute(args, exec) {
+      const agent = agentOf(exec)
+      if (!agent) throw new Error('no agent session available for this call')
+      if (typeof args.question !== 'string' || !args.question.trim()) throw new Error('question is REQUIRED')
+      const session = agent.session
+      const pre = findPreCompactionSeed(session)
+      if (pre.boundary === 0) throw new Error('no pre-compaction context to fork: run context_compact first')
+
+      const agentCtx = (agent.ctx as unknown as AgentCtxLike)
+      const agents = agentCtx.agents
+      if (!agents) throw new Error('agents registry is not available in this runtime; mount the agent capability')
+      const sessHeader = (session as unknown as { header?: { cwd?: string; id?: string; delegationDepth?: number } }).header
+      const childDepth = (sessHeader?.delegationDepth ?? 0) + 1
+      const childId = randomUUID()
+      const meta = {
+        ...(sessHeader?.cwd !== undefined ? { cwd: sessHeader.cwd } : {}),
+        parentSession: sessHeader?.id ?? session.id,
+        origin: 'subagent' as const,
+        delegationDepth: childDepth,
+        seedLength: pre.boundary,
+      }
+      // Inherit the parent's provider/model so the child's route matches.
+      const parentOptions = (agent as unknown as { options?: { provider?: string; model?: string } }).options ?? {}
+      const agentOptions = {
+        ...(parentOptions.provider !== undefined ? { provider: parentOptions.provider } : {}),
+        ...(parentOptions.model !== undefined ? { model: parentOptions.model } : {}),
+        subagentDepth: childDepth,
+      }
+      // Compose the child like a fork: join the parent's standing composition so
+      // preset / system prompt / tools match.
+      const setup = (childCtx: unknown): void => {
+        const cc = childCtx as AgentCtxLike
+        const presets = cc.get && (cc.get('agentPresets') as { composeFrom?: (child: unknown, parent: unknown) => unknown } | undefined)
+        if (presets && typeof presets.composeFrom === 'function') presets.composeFrom(childCtx, agent.ctx)
+      }
+
+      let handle: ChildAgentHandleLike
+      try {
+        handle = await agents.create({
+          sessionId: childId,
+          meta: meta as unknown,
+          seed: pre.seed,
+          agentOptions: agentOptions as unknown,
+          signal: exec.signal,
+          setup,
+        })
+      } catch (err) {
+        const msg = err && (err as Error).message ? (err as Error).message : String(err)
+        throw new Error('pre-compaction fork failed to create a child: ' + msg)
+      }
+
+      const child = handle.agent
+      try {
+        child.followup(childPrompt(args.question))
+        await child.whenIdle()
+        const res = readChildAnswer(child.session, pre.boundary)
+        const data: Record<string, JsonValue> = {
+          ok: res.outcome === 'completed',
+          answer: res.answer,
+        }
+        if (res.outcome !== 'completed') data['outcome'] = res.outcome
+        return data
+      } finally {
+        try { await handle.dispose() } catch (e) { /* ignore */ }
+      }
+    },
+  })))
+
+  // ---- automatic range compaction (no anchors, no threshold) ----
+  // The agent calls this to compact without naming a range: the engine
+  // auto-selects a compactable span and replaces it with the engine's own
+  // summarizer checkpoint (an LLM call, since no agent-written summary is
+  // provided). `compactIfNeeded(agent, 'context-overflow', signal)` is the
+  // engine's FORCED path: it skips the pressure threshold (the `pressure`
+  // trigger only compacts once measured tokens cross a configured limit) and
+  // goes straight to range selection + `compactRegion`, so calling the tool
+  // always compacts a span when one exists. It works against an open turn (the
+  // tool is called mid-step) and returns null only when the surface holds no
+  // compactable span yet. A stale `_externalSummary` from a previous
+  // `context_compact` is cleared so this path always uses the engine's own
+  // summarizer.
+  disposers.push(tools.register(defineTool({
+    name: 'context_compact_auto',
+    description: 'Compress the conversation automatically: the engine auto-selects a compactable range and replaces it with its own summarizer checkpoint, without you naming a span or writing a summary. Use when you want to compact without choosing a range. Compacts unconditionally (no pressure threshold); it reports that nothing qualified only when the surface holds no compactable span yet.',
+    parameters: {},
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render(args, value) { return [{ type: 'text', text: JSON.stringify(value) }] },
+    },
+    async execute(args, exec) {
+      const agent = agentOf(exec)
+      if (!agent) throw new Error('no agent session available for this call')
+      const engine = resolveService(agent, 'compaction') as (CompactionLike & { compactIfNeeded?: (agent: unknown, trigger: string, signal: unknown) => Promise<CompactionResultLike | null> }) | undefined
+      if (!engine) throw new Error('compaction service is not available in this runtime (tried host plane and preset realm)')
+      if (typeof engine.compactIfNeeded !== 'function') throw new Error('compaction engine does not expose compactIfNeeded')
+      patchEngine(engine as unknown as OptimizedEngineLike)
+      // Never let a leftover agent-written checkpoint leak into the auto path.
+      const ext = (engine as unknown as { _externalSummary?: Record<string, string> })._externalSummary
+      if (ext && agent.session.id in ext) delete ext[agent.session.id]
+      const result = await engine.compactIfNeeded(agent, 'context-overflow', exec.signal)
+      const data: Record<string, JsonValue> = {
+        ok: true,
+        compacted: result !== null,
+        ...(result === null ? { message: 'no compactable span on the surface yet' } : {}),
+      }
+      if (result !== null) {
+        data['compactionId'] = result.compactionId
+        if (result.shadowedRange) data['shadowedRange'] = { start: result.shadowedRange.start, end: result.shadowedRange.end }
+        if (result.shadowedSeqs) data['shadowedSeqs'] = result.shadowedSeqs
+        if (result.shadowedTokenCount != null) data['shadowedTokenCount'] = result.shadowedTokenCount
+      }
+      return data
     },
   })))
 

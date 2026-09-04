@@ -2,7 +2,7 @@
 
 [English](README.md) · 简体中文
 
-为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供上下文压缩:让 **agent 自主调用** `context_compact`,把对话中一段它选定的、已经用完不再需要的区间,替换成 agent 自己写的检查点。
+为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供上下文压缩:让 **agent 自主调用** `context_compact`,把对话中一段它选定的、已经用完不再需要的区间,替换成 agent 自己写的检查点。配套的 `context_compact_auto` 不指定区间,由引擎自动选出范围并压缩;`context_ask_precompact` 则用 fork 式子代理查询压缩前的上下文。
 
 ## 为什么
 
@@ -17,10 +17,20 @@
 ## 它做什么
 
 - agent 用 `startAnchor` / `endAnchor` 圈定区间(唯一前缀匹配,全角/半角标点不敏感),并传入**强制要求**的 `summary` —— 自己写的 Markdown 检查点。
-- 原始区间全文先归档到 spill(`~/.dsh/spill/session-<hash>/<hex>-<序号>.txt`,顺序命名、重启安全);路径通过 shadow 消息回显,模型可随时读回原文。
+- 原始区间全文先归档到 spill(`~/.dsh/spill/session-<hash>/<hex>-<序号>.txt`,顺序命名、重启安全);归档定位符在工具结果里返回,模型可随时读回原文。
 - 宿主引擎执行官方事务 —— 边界校验、工具对平衡、表面替换 —— **不发起独立的 LLM 摘要器请求**。
 
 工具调用本身发生在 agent 正常轮次内,按普通轮次正常计费;省掉的只是官方引擎为同一区间"额外再发一次摘要器请求"这件事。
+
+### 自动选择范围
+
+`context_compact_auto` 不指定区间:引擎自动选出一个可压缩范围,用引擎的摘要器检查点替换。它**无条件压缩**——没有压力阈值门控——并报告压掉了什么,或没有可压缩项(表面上还没有可压缩的区间)。由于自动路径不提供 agent 写的检查点,它使用引擎的摘要器(Llm 调用)。
+
+### 查询压缩前的上下文(压缩前状态的 fork)
+
+`context_ask_precompact(question)` 让 agent 对**最近一次 `context_compact` 之前**的上下文提问。它通过 agent 注册表创建一个 fork 式子代理,seed 用父会话在**压缩前最后一条完整 `turn/end`** 处的日志——因此被压掉的那段 span 仍是原始内容,没有被折叠成检查点。子代理通过 `composeFrom` join 同一组合(同一 preset、system prompt、tools),其上下文与主 agent 压缩前的状态一致,并可复用同一 warm-prefix 的 KV-cache。主会话表面与 cache 完全不动;答案返回。
+
+工具不新增依赖:用 `ctx.agents.create` 创建带 seed 的子代理,并用 `agentPresets` 的 `composeFrom` 组合。
 
 ## 安装
 
@@ -56,10 +66,10 @@ dsh plugin --profile web remove @mimichunterz/agent-compact
 
 ## 工作原理
 
-- **agent 自写检查点**:`summary` 是强制参数,工具路径总是走 agent 写的检查点。`patchEngine()`(见 `src/optimizer.ts`)包装引擎的 `summarize()` —— 存在 `_externalSummary`(按会话 id 一次性消费)时直接返回该文本;没有时才转发 stock 实现,该分支只服务于自动压缩路径,保持官方行为不变。
+- **agent 自写检查点**:`summary` 是强制参数,工具路径总是走 agent 写的检查点。`patchEngine()`(见 `src/optimizer.ts`)包装引擎的 `summarize()` —— 存在 `_externalSummary`(按会话 id 一次性消费)时消费它并返回一个短**占位符**而不是重新摘要;没有时才转发 stock 实现,该分支只服务于自动压缩路径,保持官方行为不变。
 - **锚点定位**(`src/normalize.ts`):`normText` 折叠空白并把 CJK 全角标点映射为半角(，→, 等),锚点与节点文本共用同一函数;仍保持**唯一前缀**语义(0 命中 → not found + 最近节点提示;多命中 → AMBIGUOUS)。
 - **重启安全的顺序归档**:fs 扫描会话目录取 `max+1` 顺序递增,无空洞;后端自带随机 hex 前缀,文件名永不冲突。
-- **配对清理**:携带完整 `summary` 参数的工具调用消息节点 + tool/result 各被替换成一条极小的 shadow 消息,避免检查点文本在表面出现两份(同一消息含多个工具调用时安全跳过)。
+- **不删除任何消息,且 summary 只出现一次**:调用方的 assistant 消息(它的推理 + 携带 `summary` 的 tool-call)及其 tool/result 都留在表面 —— 它们不在压缩区间里,shadow 掉就会丢掉 agent 压缩前的推理。区间替换是一个短占位符,因此检查点只出现一次:作为那条 tool-call 的 `summary` 参数,不会在区间位置再复制一份。
 
 ## 兼容性
 

@@ -2,7 +2,7 @@
 
 English · [简体中文](README.zh-CN.md)
 
-Context compression for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): lets the **agent autonomously call** `context_compact` to compress a span of the conversation it chooses — the finished, no-longer-needed middle — and replace it with a checkpoint the agent writes itself.
+Context compression for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): lets the **agent autonomously call** `context_compact` to compress a span of the conversation it chooses — the finished, no-longer-needed middle — and replace it with a checkpoint the agent writes itself. A companion `context_compact_auto` compacts the engine's own auto-selected range without naming a span, and `context_ask_precompact` consults the pre-compaction context via a fork-style child.
 
 ## Why
 
@@ -17,10 +17,20 @@ Typical moments to use it:
 ## What it does
 
 - The agent picks the span via `startAnchor` / `endAnchor` (unique-prefix matching, CJK punctuation-width tolerant) and passes a **required** `summary` — the Markdown checkpoint it wrote itself.
-- The raw span is archived to the spill store first (`~/.dsh/spill/session-<hash>/<hex>-<seq>.txt`, sequential naming, restart-safe); the path is echoed in the shadow message so the model can read the raw text back.
+- The raw span is archived to the spill store first (`~/.dsh/spill/session-<hash>/<hex>-<seq>.txt`, sequential naming, restart-safe); the archive locator is returned in the tool result so the model can read the raw text back.
 - The host engine runs the stock transaction — boundary validation, tool-pair balance, surface replacement — with **no separate LLM summarizer request**.
 
 The tool call itself happens inside the agent's normal turn and is billed like any other turn; what is avoided is only the *extra* summarizer request the official engine would make for the same span.
+
+### Auto range selection
+
+`context_compact_auto` compacts without naming a span: the engine auto-selects a compactable range and replaces it with the engine's summarizer checkpoint. It compacts unconditionally — there is no pressure-threshold gate — and reports what was compacted, or that nothing qualified (the surface holds no compactable span yet). Because the auto path provides no agent-written checkpoint, it uses the engine's summarizer (an LLM call).
+
+### Consulting the pre-compaction context (fork of the pre-compaction state)
+
+`context_ask_precompact(question)` lets the agent ask a question against the context that stood **before** the most recent `context_compact`. It creates a fork-style child through the agent registry, seeded with the parent's log up to the last completed turn **before** the compaction — so the span that was compacted away is still original, not folded into a checkpoint. The child joins the same composition (`composeFrom`): same preset, system prompt, and tools. Its context therefore matches the main agent's pre-compaction state and is eligible for the same warm-prefix KV cache. The main session's surface and cache are untouched; the answer is returned here.
+
+The tool needs no extra dependency: it uses the agent registry (`ctx.agents.create`) for the seeded child and composes it via `composeFrom` from `agentPresets`.
 
 ## Install
 
@@ -56,10 +66,10 @@ Pass through the inserted row in the profile's `cordis.patch.yml` or a bundle pa
 
 ## How it works
 
-- **Agent-written checkpoint**: `summary` is mandatory, so the tool path always uses the checkpoint the agent wrote. `patchEngine()` (see `src/optimizer.ts`) wraps the engine's `summarize()`: when an `_externalSummary` is present (one-shot, keyed per session id), it returns that text directly; only when none is present does it forward to the stock implementation — a branch that serves the automatic compaction path and keeps official behavior intact.
+- **Agent-written checkpoint**: `summary` is mandatory, so the tool path always uses the checkpoint the agent wrote. `patchEngine()` (see `src/optimizer.ts`) wraps the engine's `summarize()`: when an `_externalSummary` is present (one-shot, keyed per session id), it consumes it and returns a short **placeholder** instead of re-summarizing; only when none is present does it forward to the stock implementation — a branch that serves the automatic compaction path and keeps official behavior intact.
 - **Anchor matching** (`src/normalize.ts`): `normText` collapses whitespace and maps CJK full-width punctuation to half-width (，→, etc.), applied to both anchors and node text. Matching keeps **unique-prefix** semantics: zero hits → "not found" with closest-node hints; more than one hit → "AMBIGUOUS".
 - **Restart-safe sequential archives**: the next number is derived by scanning the session's spill directory (`max+1`) — gap-free; the backend's random hex prefix makes filename collisions impossible.
-- **Paired cleanup**: the tool-call message (carrying the full `summary` argument) and its tool/result are each replaced by one tiny shadow message, so the checkpoint text never appears twice on the surface (skipped when the message holds more than one tool call).
+- **No message is removed, and the summary appears once**: the caller's assistant/message (its reasoning + the tool-call carrying the `summary`) and its tool/result stay on the surface — they are not part of the compacted span, and shadowing them would drop the agent's pre-compaction reasoning. The span replacement is a short placeholder, so the checkpoint lives exactly once: as the `summary` argument of that tool-call, not also at the span.
 
 ## Compatibility
 
