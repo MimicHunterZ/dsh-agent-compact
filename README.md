@@ -22,11 +22,11 @@ Typical moments to use it:
 
 The tool call itself happens inside the agent's normal turn and is billed like any other turn; what is avoided is only the *extra* summarizer request the official engine would make for the same span.
 
-### Consulting the pre-compaction context (fork-style)
+### Consulting the pre-compaction context (fork of the pre-compaction state)
 
-`context_ask_precompact(question)` lets the agent ask a question against the current (pre-compaction) context, answered by a **fork subagent** that inherits this conversation. The child joins the same composition (`composeFrom`) — same preset, system prompt, and tools — and carries the parent's completed-turn history, so its context matches the main agent's and stays eligible for the same warm-prefix KV cache. Called before compacting, the parent's context is still the full pre-compaction conversation, so the child answers as the pre-compaction agent. The main session's surface and cache are untouched.
+`context_ask_precompact(question)` lets the agent ask a question against the context that stood **before** the most recent `context_compact`. It creates a fork-style child through the agent registry, seeded with the parent's log up to the last completed turn **before** the compaction — so the span that was compacted away is still original, not folded into a checkpoint. The child joins the same composition (`composeFrom`): same preset, system prompt, and tools. Its context therefore matches the main agent's pre-compaction state and is eligible for the same warm-prefix KV cache. The main session's surface and cache are untouched; the answer is returned here.
 
-Requires the subagent capability (`ctx.subagents`) to be mounted; the tool prefers a provider that inherits the parent conversation (fork) so the child sees exactly the parent's context, and falls back to `fork` by name, then the first registered provider.
+The tool needs no extra dependency: it uses the agent registry (`ctx.agents.create`) for the seeded child and composes it via `composeFrom` from `agentPresets`.
 
 ## Install
 

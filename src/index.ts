@@ -6,12 +6,13 @@
 // per-session compaction engine on first use so its summarize() honors
 // agent-written checkpoints (see ./optimizer.js).
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import Schema from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { createShadowUserMessage } from './shadow-message.js'
 import { patchEngine } from './optimizer.js'
 import { normText } from './normalize.js'
@@ -598,48 +599,121 @@ export function apply(ctx: Context, config: Config) {
     },
   })))
 
-  // ---- pre-compaction consultation (fork-style) ----
-  // The child is created through the subagent seam exactly like a `fork`
-  // child: `applyChildComposition` joins the parent's standing composition
-  // (`composeFrom`) so the child shares the SAME preset, system prompt, and
-  // tool set, and the fork provider seeds the child with the parent's
-  // completed-turn prefix. The child's context therefore IS the parent's
-  // context — consistent, and eligible for the same warm-prefix KV cache.
-  // Called while the compaction is still being decided, the parent's context is
-  // the full pre-compaction conversation, so the child answers as the
-  // pre-compaction agent. The main session is untouched.
-  interface SubagentsLike {
-    list(): string[]
-    getProvider(name: string): { inheritsParentContext?: boolean } | undefined
-    start(name: string, request: {
-      label?: string
-      prompt: { type: string; text: string }[]
-      parent: unknown
-      signal: unknown
-    }): Promise<{
-      result: Promise<{ output?: { type?: string; text?: string }[]; stopReason?: unknown; diagnostic?: string }>
-      dispose(): Promise<void>
-    }>
+  // ---- pre-compaction consultation (fork of the pre-compaction context) ----
+  // `ctx.subagents.start('fork')` seeds the child with the parent's CURRENT
+  // completed-turn prefix, which after a compaction folds to the post-compaction
+  // surface. To ask the PRE-compaction agent we create the child through the
+  // agent registry (no new dependency) and seed it with the parent's log up to
+  // the last completed turn BEFORE the compaction, so the span that was compacted
+  // away is still original. The child is composed with `agentPresets.composeFrom`,
+  // so it joins the SAME standing composition as the parent — same preset, system
+  // prompt, and tools. (The subagent seam's delegated approval/sandbox policy is
+  // not pinned here; the child is a throwaway context query.) The main session is
+  // untouched; the answer is returned here.
+
+  interface ChildAgentHandleLike {
+    agent: {
+      followup(message: unknown): void
+      whenIdle(): Promise<void>
+      session: {
+        events: readonly unknown[]
+        append(type: string, data: unknown, opts: unknown): unknown
+      }
+    }
+    dispose(): Promise<void>
   }
 
-  // Prefer a provider whose child inherits the parent conversation (fork), so
-  // the child sees exactly the context the parent does.
-  function pickForkProvider(subagents: SubagentsLike): string {
-    const names = subagents.list()
-    if (names.length === 0) throw new Error('no subagent provider is registered')
-    for (const name of names) {
-      const p = subagents.getProvider(name)
-      if (p && p.inheritsParentContext === true) return name
+  interface AgentsRegistryLike {
+    create(options: {
+      sessionId: string
+      meta?: unknown
+      seed?: readonly unknown[]
+      agentOptions?: unknown
+      signal?: unknown
+      setup?: (childCtx: unknown) => void
+    }): Promise<ChildAgentHandleLike>
+  }
+
+  interface AgentCtxLike {
+    agents?: AgentsRegistryLike
+    get(name: string): unknown
+  }
+
+  // The parent's pre-compaction surface: events up to (and including) the last
+  // completed `turn/end` before the most recent `compaction/start`. Because the
+  // parent log is contiguous from seq 0, this slice is a valid balanced seed and
+  // replays to the pre-compaction surface (the compacted span is not folded).
+  interface PreCompactionSeed {
+    seed: readonly unknown[]
+    boundary: number
+  }
+
+  function findPreCompactionSeed(session: SessionLike): PreCompactionSeed {
+    const events = session.events
+    if (!events || events.length === 0) return { seed: [], boundary: 0 }
+    let compactStartIdx = -1
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i] as { type?: string } | undefined
+      if (ev && ev.type === 'compaction/start') {
+        compactStartIdx = i
+        break
+      }
     }
-    if (names.includes('fork')) return 'fork'
-    return names[0]
+    if (compactStartIdx < 0) return { seed: [], boundary: 0 }
+    let endIdx = compactStartIdx
+    for (let i = compactStartIdx - 1; i >= 0; i--) {
+      const ev = events[i] as { type?: string } | undefined
+      if (ev && ev.type === 'turn/end') {
+        endIdx = i
+        break
+      }
+    }
+    const seed = events.slice(0, endIdx + 1)
+    return { seed: seed as readonly unknown[], boundary: seed.length }
+  }
+
+  // Frame the child's message: the pre-compaction context is in the seed, so the
+  // prompt is just the question (the child answers as the pre-compaction agent).
+  function childPrompt(question: string): unknown {
+    return createUserMessage({
+      content: [{ type: 'text', text: question }],
+      source: { kind: 'user' },
+    })
+  }
+
+  // Read the child's own output and turn outcome from its post-boundary events
+  // without importing the subagent seam's helpers: the last non-empty
+  // assistant/message is the answer, the last turn/end's reason is the outcome.
+  function readChildAnswer(childSession: { events: readonly unknown[] }, boundary: number): { answer: string; outcome: string } {
+    const own = childSession.events.slice(boundary)
+    let answer = ''
+    let outcome = 'completed'
+    for (let i = own.length - 1; i >= 0; i--) {
+      const ev = own[i] as { type?: string; data?: unknown } | undefined
+      if (!ev || typeof ev.type !== 'string') continue
+      if (ev.type === 'turn/end') {
+        const reasonKind = (ev.data as { reason?: { kind?: string } } | undefined)?.reason?.kind
+        if (typeof reasonKind === 'string' && reasonKind !== 'completed') outcome = reasonKind
+        break
+      }
+      if (ev.type === 'assistant/message' && answer === '') {
+        const msg = (ev.data as { message?: { content?: unknown } } | undefined)?.message
+        const content = msg && Array.isArray(msg.content) ? msg.content : []
+        const text = content
+          .filter((b): b is { type: 'text'; text: string } => typeof b === 'object' && b !== null && (b as { type?: string }).type === 'text' && typeof (b as { text?: string }).text === 'string')
+          .map((b) => b.text)
+          .join('')
+        if (text) answer = text
+      }
+    }
+    return { answer: answer || '(empty)', outcome }
   }
 
   disposers.push(tools.register(defineTool({
     name: 'context_ask_precompact',
-    description: 'Ask a question against the pre-compaction context, answered by a FORK subagent that inherits this conversation. The child joins the same composition (same preset, system prompt, tools) and carries the parent\'s completed-turn history, so its context matches the main agent\'s — consistent and eligible for the same warm-prefix cache. Use before compacting to preserve a detail, or to have the pre-compaction agent answer while the full context is intact. The answer is returned here; the main session is untouched.',
+    description: 'Ask a question against the PRE-compaction context, answered by a fork subagent seeded with the conversation as it stood before the most recent compaction. The child is composed exactly like a fork child (same preset, system prompt, tools) and replays the pre-compaction log, so the span that context_compact compressed away is still present and its context matches the main agent\'s pre-compaction state — eligible for the same warm-prefix KV cache. Use it to consult a detail the compaction is about to (or already did) remove. The main session is untouched; the answer is returned here.',
     parameters: {
-      question: { type: 'string', description: 'The question to answer from the current (pre-compaction) context.' },
+      question: { type: 'string', description: 'The question to answer from the pre-compaction context.' },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
@@ -649,33 +723,67 @@ export function apply(ctx: Context, config: Config) {
       const agent = agentOf(exec)
       if (!agent) throw new Error('no agent session available for this call')
       if (typeof args.question !== 'string' || !args.question.trim()) throw new Error('question is REQUIRED')
-      const subagents = resolveService(agent, 'subagents') as SubagentsLike | undefined
-      if (!subagents) throw new Error('subagents service is not available in this runtime; mount the subagent capability')
-      const providerName = pickForkProvider(subagents)
-      const run = await subagents.start(providerName, {
-        label: 'ask pre-compaction context',
-        prompt: [{ type: 'text', text: args.question }],
-        parent: agent,
-        signal: exec.signal,
-      })
-      let result: { output?: { type?: string; text?: string }[]; stopReason?: unknown; diagnostic?: string }
+      const session = agent.session
+      const pre = findPreCompactionSeed(session)
+      if (pre.boundary === 0) throw new Error('no pre-compaction context to fork: run context_compact first')
+
+      const agentCtx = (agent.ctx as unknown as AgentCtxLike)
+      const agents = agentCtx.agents
+      if (!agents) throw new Error('agents registry is not available in this runtime; mount the agent capability')
+      const sessHeader = (session as unknown as { header?: { cwd?: string; id?: string; delegationDepth?: number } }).header
+      const childDepth = (sessHeader?.delegationDepth ?? 0) + 1
+      const childId = randomUUID()
+      const meta = {
+        ...(sessHeader?.cwd !== undefined ? { cwd: sessHeader.cwd } : {}),
+        parentSession: sessHeader?.id ?? session.id,
+        origin: 'subagent' as const,
+        delegationDepth: childDepth,
+        seedLength: pre.boundary,
+      }
+      // Inherit the parent's provider/model so the child's route matches.
+      const parentOptions = (agent as unknown as { options?: { provider?: string; model?: string } }).options ?? {}
+      const agentOptions = {
+        ...(parentOptions.provider !== undefined ? { provider: parentOptions.provider } : {}),
+        ...(parentOptions.model !== undefined ? { model: parentOptions.model } : {}),
+        subagentDepth: childDepth,
+      }
+      // Compose the child like a fork: join the parent's standing composition so
+      // preset / system prompt / tools match.
+      const setup = (childCtx: unknown): void => {
+        const cc = childCtx as AgentCtxLike
+        const presets = cc.get && (cc.get('agentPresets') as { composeFrom?: (child: unknown, parent: unknown) => unknown } | undefined)
+        if (presets && typeof presets.composeFrom === 'function') presets.composeFrom(childCtx, agent.ctx)
+      }
+
+      let handle: ChildAgentHandleLike
       try {
-        result = await run.result
+        handle = await agents.create({
+          sessionId: childId,
+          meta: meta as unknown,
+          seed: pre.seed,
+          agentOptions: agentOptions as unknown,
+          signal: exec.signal,
+          setup,
+        })
+      } catch (err) {
+        const msg = err && (err as Error).message ? (err as Error).message : String(err)
+        throw new Error('pre-compaction fork failed to create a child: ' + msg)
+      }
+
+      const child = handle.agent
+      try {
+        child.followup(childPrompt(args.question))
+        await child.whenIdle()
+        const res = readChildAnswer(child.session, pre.boundary)
+        const data: Record<string, JsonValue> = {
+          ok: res.outcome === 'completed',
+          answer: res.answer,
+        }
+        if (res.outcome !== 'completed') data['outcome'] = res.outcome
+        return data
       } finally {
-        try { await run.dispose() } catch (e) { /* ignore */ }
+        try { await handle.dispose() } catch (e) { /* ignore */ }
       }
-      const answer = (result.output ?? [])
-        .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
-        .map((b) => b.text as string)
-        .join('')
-      const data: Record<string, JsonValue> = {
-        ok: result.stopReason === 'completed',
-        answer: answer || '(empty)',
-      }
-      const sr = result.stopReason
-      if (sr !== undefined) data['stopReason'] = String(sr)
-      if (result.diagnostic) data['diagnostic'] = result.diagnostic
-      return data
     },
   })))
 

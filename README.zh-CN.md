@@ -22,11 +22,11 @@
 
 工具调用本身发生在 agent 正常轮次内,按普通轮次正常计费;省掉的只是官方引擎为同一区间"额外再发一次摘要器请求"这件事。
 
-### 以 fork 方式查询压缩前的上下文
+### 查询压缩前的上下文(压缩前状态的 fork)
 
-`context_ask_precompact(question)` 让 agent 对当前(压缩前)的上下文提问,由**一个 fork 子代理**回答,该子代理继承本会话。子代理 join 同一组合(`composeFrom`)——同一 preset、system prompt、tools——并携带父会话已完成的历史,因此它的上下文与主 agent 一致,并可复用同一 warm-prefix 的 KV-cache。在压缩前调用时,父上下文仍是完整的压缩前会话,子代理即可作为"压缩前的 agent"来回答。主会话表面与 cache 完全不动。
+`context_ask_precompact(question)` 让 agent 对**最近一次 `context_compact` 之前**的上下文提问。它通过 agent 注册表创建一个 fork 式子代理,seed 用父会话在**压缩前最后一条完整 `turn/end`** 处的日志——因此被压掉的那段 span 仍是原始内容,没有被折叠成检查点。子代理通过 `composeFrom` join 同一组合(同一 preset、system prompt、tools),其上下文与主 agent 压缩前的状态一致,并可复用同一 warm-prefix 的 KV-cache。主会话表面与 cache 完全不动;答案返回。
 
-依赖子代理能力(`ctx.subagents`)已挂载;工具优先选一个**继承父会话**的 provider(fork),使子代理看到的正是父的上下文;找不到时按名字回退到 `fork`,再回退到第一个已注册的 provider。
+工具不新增依赖:用 `ctx.agents.create` 创建带 seed 的子代理,并用 `agentPresets` 的 `composeFrom` 组合。
 
 ## 安装
 
