@@ -2,7 +2,7 @@
 
 English · [简体中文](README.zh-CN.md)
 
-Context compression for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): lets the **agent autonomously call** `context_compact` to compress a span of the conversation it chooses — the finished, no-longer-needed middle — and replace it with a checkpoint the agent writes itself.
+Context compression for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): lets the **agent autonomously call** `context_compact` to compress a span of the conversation it chooses — the finished, no-longer-needed middle — and replace it with a checkpoint the agent writes itself. A companion `context_compact_auto` compacts the engine's own auto-selected range without naming a span, and `context_ask_precompact` consults the pre-compaction context via a fork-style child.
 
 ## Why
 
@@ -21,6 +21,10 @@ Typical moments to use it:
 - The host engine runs the stock transaction — boundary validation, tool-pair balance, surface replacement — with **no separate LLM summarizer request**.
 
 The tool call itself happens inside the agent's normal turn and is billed like any other turn; what is avoided is only the *extra* summarizer request the official engine would make for the same span.
+
+### Auto range selection
+
+`context_compact_auto` compacts without naming a span: the engine's own pressure trigger auto-selects the oldest compactable range and replaces it with the engine's summarizer checkpoint. It reports what was compacted, or that nothing qualified (the context was below the pressure threshold). Because the auto path provides no agent-written checkpoint, it uses the engine's summarizer (an LLM call).
 
 ### Consulting the pre-compaction context (fork of the pre-compaction state)
 

@@ -2,7 +2,7 @@
 
 [English](README.md) · 简体中文
 
-为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供上下文压缩:让 **agent 自主调用** `context_compact`,把对话中一段它选定的、已经用完不再需要的区间,替换成 agent 自己写的检查点。
+为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供上下文压缩:让 **agent 自主调用** `context_compact`,把对话中一段它选定的、已经用完不再需要的区间,替换成 agent 自己写的检查点。配套的 `context_compact_auto` 不指定区间,由引擎自动选出范围并压缩;`context_ask_precompact` 则用 fork 式子代理查询压缩前的上下文。
 
 ## 为什么
 
@@ -21,6 +21,10 @@
 - 宿主引擎执行官方事务 —— 边界校验、工具对平衡、表面替换 —— **不发起独立的 LLM 摘要器请求**。
 
 工具调用本身发生在 agent 正常轮次内,按普通轮次正常计费;省掉的只是官方引擎为同一区间"额外再发一次摘要器请求"这件事。
+
+### 自动选择范围
+
+`context_compact_auto` 不指定区间:引擎的压力触发器自动选出最旧的可压缩范围,用引擎的摘要器检查点替换。它报告压掉了什么,或没有可压缩项(上下文低于压力阈值)。由于自动路径不提供 agent 写的检查点,它使用引擎的摘要器(Llm 调用)。
 
 ### 查询压缩前的上下文(压缩前状态的 fork)
 
