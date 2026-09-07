@@ -241,7 +241,7 @@ export function apply(ctx: Context, config: Config) {
     disposers.push(systemPrompt.section({
       name: 'tool:context_compact',
       order: 118,
-      text: 'Use the context_compact tool to proactively externalize conversation spans that have served their purpose, the way a smart human memory keeps what matters and lets go of the rest — routine memory hygiene, not a last resort. Compress only a span whose information a summary fully covers for the rest of the conversation; if verbatim detail may still be needed, leave it. The tool replaces only the span you select: compress in segments when important text sits inside a dead region, and compress large outputs (log queries, big file reads) as soon as they are read and digested. Evaluate whenever a span has been used up, not only at topic boundaries, and never compress the opening, the in-flight task, or the active instruction; preserve exact paths, commands, IDs, and the user\'s requirements in the checkpoint.',
+      text: 'Use the context_compact tool to proactively externalize conversation spans that have served their purpose, the way a smart human memory keeps what matters and lets go of the rest — routine memory hygiene, not a last resort. Compress only a span whose information a summary fully covers for the rest of the conversation; if verbatim detail may still be needed, leave it. The tool replaces only the span you select: compress in segments by sub-task/module: when a single sub-task has consumed a big share of the surface and reaches a conclusion, compact that module\'s span in chunks before moving on — never accumulate separate dead spans into one giant compression. Compress large outputs (log queries, big file reads) as soon as they are read and digested. Evaluate whenever a span has been used up, not only at topic boundaries, and never compress the opening, the in-flight task, or the active instruction; preserve exact paths, commands, IDs, and the user\'s requirements in the checkpoint.',
     }))
   }
 
@@ -280,7 +280,7 @@ export function apply(ctx: Context, config: Config) {
           const bucket = Math.floor(grown / threshold)
           if (bucket <= 0) return ''
           const approxK = Math.round((bucket * threshold) / 1000)
-          return '`context_compact` reminder: this session\'s surface has grown by roughly ' + approxK + 'k+ tokens since the last compaction (tool results AND your own reasoning/output both count). If the work that produced it has reached a conclusion, compact that span now with `context_compact` — do not wait to be asked.'
+          return '`context_compact` reminder: this session\'s surface has grown by roughly ' + approxK + 'k+ tokens since the last compaction (tool results AND your own reasoning/output both count). Compress by sub-task module, not all at once: when one sub-task\'s span (its tool results + your reasoning/output) has consumed a large share of the surface and that sub-task has reached a conclusion, compact that module\'s span in chunks now with `context_compact` — do not wait to be asked.'
         } catch (e) {
           return ''
         }
