@@ -20,16 +20,17 @@ export const TYPERT_REMOTE = {
           codec: {
             mode: 'strict',
             typeSymbol: '@mimichunterz/agent-compact/ctx-surface#CtxSurfaceReadRequest',
-            schema: request$schema,
+            // 0.2 的 TypertCodec（strict）由 `schema` 值改为 `create()` 惰性取 schema。
+            create: () => request$schema,
           },
         },
       ],
       result: {
         mode: 'strict',
         typeSymbol: '@mimichunterz/agent-compact/ctx-surface#CtxSurfaceReadResult',
-        schema: result$schema,
+        create: () => result$schema,
       },
-      sourceLocation: { file: 'src/ctx-surface.ts', line: 225, column: 3 },
+      sourceLocation: { file: 'src/ctx-surface.ts', line: 181, column: 3 },
     },
   ],
 }

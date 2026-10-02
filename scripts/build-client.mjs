@@ -87,15 +87,15 @@ const tail = `
 					codec: {
 						mode: 'strict',
 						typeSymbol: '@mimichunterz/agent-compact/ctx-surface#CtxSurfaceReadRequest',
-						schema: _ctxSurface_read_request$schema,
+						create: () => _ctxSurface_read_request$schema,
 					},
 				}],
 				result: {
 					mode: 'strict',
 					typeSymbol: '@mimichunterz/agent-compact/ctx-surface#CtxSurfaceReadResult',
-					schema: _ctxSurface_read_result$schema,
+					create: () => _ctxSurface_read_result$schema,
 				},
-				sourceLocation: { file: 'src/ctx-surface.ts', line: 225, column: 3 },
+				sourceLocation: { file: 'src/ctx-surface.ts', line: 181, column: 3 },
 			}],
 		}
 		//#endregion

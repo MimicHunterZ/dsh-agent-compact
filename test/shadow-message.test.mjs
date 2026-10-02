@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
-import { createShadowUserMessage } from '../lib/shadow-message.js'
+import { createShadowUserMessage, SHADOW_SOURCE_KIND } from '../lib/shadow-message.js'
 
 test('paired cleanup replacements remain valid user messages', () => {
   const session = Session.create('session-shadow-test')
@@ -44,7 +44,7 @@ test('paired cleanup replacements remain valid user messages', () => {
     'user/message',
     createShadowUserMessage('assistant placeholder'),
     {
-      surfaceOp: { op: 'replace', start: assistantSeq, end: assistantSeq },
+      surfaceOp: { op: 'replace', startSeq: assistantSeq, endSeq: assistantSeq },
       sourceEventSeqs: [assistantSeq],
     },
   )
@@ -52,7 +52,7 @@ test('paired cleanup replacements remain valid user messages', () => {
     'user/message',
     createShadowUserMessage('result placeholder'),
     {
-      surfaceOp: { op: 'replace', start: resultSeq, end: resultSeq },
+      surfaceOp: { op: 'replace', startSeq: resultSeq, endSeq: resultSeq },
       sourceEventSeqs: [resultSeq],
     },
   )
@@ -60,7 +60,9 @@ test('paired cleanup replacements remain valid user messages', () => {
   assert.doesNotThrow(() => session.deriveMessages().forEach((message) => {
     assert.equal(message.role, 'user')
     assert.equal(typeof message.id, 'string')
-    assert.equal(typeof message.source.kind, 'string')
+    // 0.2 取消了通用的 `plugin` 来源；本插件声明并使用自己的 kind。
+    assert.equal(message.source.kind, SHADOW_SOURCE_KIND)
+    assert.notEqual(message.source.kind, 'plugin')
     assert.equal(isCompactCheckpointSource(message.source), false)
   }))
 })

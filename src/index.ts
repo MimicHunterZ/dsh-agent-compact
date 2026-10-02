@@ -5,7 +5,9 @@
 import { createHash } from 'node:crypto'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+// 0.2 起 `JsonValue` 从 dsh-tools / dsh-session 移到 dsh-util-values。
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import Schema from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import { createShadowUserMessage } from './shadow-message.js'
@@ -406,13 +408,13 @@ export function apply(ctx: Context, config: Config) {
                     ? '; raw span archived at ' + locText + '.'
                     : '; raw span not archived.')
                   session.append('user/message', createShadowUserMessage(doneText), {
-                    surfaceOp: { op: 'replace', start: assistantSeq, end: assistantSeq },
+                    surfaceOp: { op: 'replace', startSeq: assistantSeq, endSeq: assistantSeq },
                     sourceEventSeqs: [assistantSeq],
                   })
                   // 复用该占位槽位作为自我触发的习惯提醒：每次成功调用都给
                   // 下一次留下提示，引导模型自主管理上下文。
                   session.append('user/message', createShadowUserMessage('`context_compact` result shadowed. Keep managing context this way on your own: once the next sub-task finishes, an error gets resolved, or a large tool result has been fully digested, compact that span before it goes stale — do not wait to be asked again.'), {
-                    surfaceOp: { op: 'replace', start: resultSeq, end: resultSeq },
+                    surfaceOp: { op: 'replace', startSeq: resultSeq, endSeq: resultSeq },
                     sourceEventSeqs: [resultSeq],
                   })
                   ctx.logger.info('[context_compact] %s paired cleanup: shadowed assistant/message %d + tool/result %d', sid, assistantSeq, resultSeq)

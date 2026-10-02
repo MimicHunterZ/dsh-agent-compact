@@ -66,7 +66,8 @@ dsh plugin --profile web remove @mimichunterz/agent-compact
 
 ## 兼容性
 
-- 针对 DeepSeek Harness `0.1.1-rc.2`(`@deepseek-ai/dsh-compaction-basic@0.1.1-rc.2`)构建与验证。
+- 针对 DeepSeek Harness `0.2.0-rc.2`(`@deepseek-ai/dsh-compaction-basic@0.2.0-rc.2`,cordis `4.0.4`,schemastery `3.18.4`)构建与验证。
+- 0.2 迁移要点:`MessageSourceMap` 取消了通用的 `plugin` 来源,shadow 消息改为声明插件私有的 `agent-compact`;`SurfaceOp` replace 改用 `startSeq`/`endSeq`(原为 `start`/`end`);strict `TypertCodec` 由 `schema` 值改为 `create()`;`JsonValue` 从 `dsh-tools`/`dsh-session` 移到 `@deepseek-ai/dsh-util-values`;`dsh.client.inject` 填的是客户端**包名**(原先误填服务名)。
 - 每个会话**同一时刻只允许一次压缩**(引擎事务串行);锚点每次重新解析,重复压缩不会因之前的检查点而过期。
 - 本地 spill 后端固定 root;换用其他后端时归档功能按可用性降级(无 `root` 字段则回退内存计数),压缩本身不受影响。
 
